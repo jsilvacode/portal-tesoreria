@@ -299,10 +299,10 @@ a { color: inherit; text-decoration: none; }
   .auth-aside { display: none; }
   .auth-main { position: relative; isolation: isolate; overflow: hidden; justify-content: flex-start; min-height: 100svh; padding: calc(24px + env(safe-area-inset-top)) max(22px, env(safe-area-inset-right)) calc(18px + env(safe-area-inset-bottom)) max(22px, env(safe-area-inset-left)); background: #f7f9fc; }
   .auth-main::before {
-    position: absolute; top: 0; right: 0; left: 0; z-index: 0; height: min(490px, 61svh);
+    position: absolute; top: 0; right: 0; bottom: calc(68px + env(safe-area-inset-bottom)); left: 0; z-index: 0;
     border-radius: 0 0 24px 24px;
     background:
-      linear-gradient(180deg, rgba(8, 37, 72, .72), rgba(18, 59, 112, .68) 64%, rgba(247, 249, 252, .98) 100%),
+      linear-gradient(180deg, rgba(8, 37, 72, .76), rgba(18, 59, 112, .7) 43%, rgba(31, 75, 126, .5) 68%, rgba(247, 249, 252, .99) 100%),
       url("/growth-bg.jpg") 0% 58% / cover no-repeat;
     content: "";
   }
