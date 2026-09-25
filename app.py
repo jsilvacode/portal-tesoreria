@@ -175,7 +175,7 @@ def postgres_row_factory(cursor):
 class PostgresConnection:
     """Small compatibility layer for the SQLite queries used by this app."""
 
-    _ID_TABLES = {"users", "import_batches", "import_previews"}
+    _ID_TABLES = {"users", "import_batches"}
 
     def __init__(self, connection, psycopg):
         self._connection = connection
