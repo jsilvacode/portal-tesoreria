@@ -139,6 +139,15 @@ class PostgresCursor:
             self._prefetched = None
         return rows
 
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        row = self.fetchone()
+        if row is None:
+            raise StopIteration
+        return row
+
     @property
     def rowcount(self):
         return self._cursor.rowcount
