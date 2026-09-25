@@ -154,7 +154,12 @@ class HybridRow(dict):
 
 
 def postgres_row_factory(cursor):
-    names = [column.name for column in cursor.description]
+    # psycopg asks for a row factory even when a statement has no result set
+    # (for example, CREATE TABLE). In that case there is no description.
+    description = cursor.description
+    if description is None:
+        return lambda values: values
+    names = [column.name for column in description]
     return lambda values: HybridRow(zip(names, values))
 
 
