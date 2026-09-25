@@ -604,18 +604,18 @@ def get_summary(
         "closing": sum(item["closing"] for item in summaries),
         "rows": sum(item["rows"] for item in summaries),
     }
-    monthly_query = conn.execute(
-        """SELECT substr(movement_date, 1, 7) AS month,
+    monthly_sql = """SELECT substr(movement_date, 1, 7) AS month,
              COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS inflow,
              COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) AS outflow,
              COALESCE(SUM(amount), 0) AS net
            FROM transactions
-           WHERE movement_date >= ? AND movement_date <= ?
-             AND (? IS NULL OR department_name = ?)
-           GROUP BY substr(movement_date, 1, 7)
-           ORDER BY month""",
-        (start, end, department_name, department_name),
-    ).fetchall()
+           WHERE movement_date >= ? AND movement_date <= ?"""
+    monthly_parameters = [start, end]
+    if department_name is not None:
+        monthly_sql += " AND department_name = ?"
+        monthly_parameters.append(department_name)
+    monthly_sql += " GROUP BY substr(movement_date, 1, 7) ORDER BY month"
+    monthly_query = conn.execute(monthly_sql, monthly_parameters).fetchall()
     monthly_map = {row["month"]: row for row in monthly_query}
     month_cursor = date.fromisoformat(start).replace(day=1)
     last_month = date.fromisoformat(end).replace(day=1)
