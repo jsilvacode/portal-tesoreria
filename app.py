@@ -216,6 +216,17 @@ class PostgresConnection:
             self._connection.rollback()
             raise sqlite3.IntegrityError(str(exc)) from exc
 
+    def executemany(self, sql: str, parameters):
+        """Run a parameterized batch efficiently for PostgreSQL imports."""
+        sql = sql.strip().replace("?", "%s")
+        try:
+            cursor = self._connection.cursor()
+            cursor.executemany(sql, parameters)
+            return PostgresCursor(cursor)
+        except self._psycopg.IntegrityError as exc:
+            self._connection.rollback()
+            raise sqlite3.IntegrityError(str(exc)) from exc
+
     def executescript(self, script: str):
         schema = re.sub(
             r"\bINTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b",
@@ -1451,10 +1462,13 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                VALUES (?, ?, ?, ?, ?, ?)""",
             (token, filename, file_hash, len(records), actor["id"], utc_now()),
         )
-        for record in records:
-            conn.execute(
+        staging_rows = [
+            (token, json.dumps(record, ensure_ascii=False)) for record in records
+        ]
+        for start in range(0, len(staging_rows), 1000):
+            conn.executemany(
                 "INSERT INTO import_staging(preview_token, record_json) VALUES (?, ?)",
-                (token, json.dumps(record, ensure_ascii=False)),
+                staging_rows[start : start + 1000],
             )
         record_audit(
             conn,
