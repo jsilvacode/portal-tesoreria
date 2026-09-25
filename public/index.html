@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#123b70">
+    <meta name="description" content="Panel seguro de informes financieros de Tesorería UNACH.">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/app.css">
+    <title>Tesorería UNACH</title>
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div id="toast-region" class="toast-region" aria-live="polite"></div>
+
+    <main id="auth-screen" class="auth-shell">
+      <section class="auth-aside" aria-label="Tesorería UNACH">
+        <a class="brand brand-light" href="/">
+          <span class="brand-mark" aria-hidden="true">U</span>
+          <span><strong>Tesorería</strong><small>Iglesia UNACH</small></span>
+        </a>
+        <svg class="finance-watermark" viewBox="0 0 360 240" aria-hidden="true" focusable="false">
+          <path d="M14 210H346M14 158H346M14 106H346M14 54H346" />
+          <path d="M40 210V155h32v55M105 210V128h32v82M170 210V98h32v112M235 210V68h32v142M300 210V36h32v174" />
+          <path d="m26 166 62-28 62 10 62-53 62 13 62-64" />
+        </svg>
+        <div class="auth-aside-copy">
+          <h1>Informe Financiero</h1>
+        </div>
+        <div class="auth-aside-foot">
+          <span class="status-dot"></span>
+          <span>Acceso de uso interno</span>
+        </div>
+      </section>
+
+      <section class="auth-main">
+        <div class="auth-mobile-brand brand">
+          <span class="brand-mark" aria-hidden="true">U</span>
+          <span><strong>Tesorería</strong><small>Iglesia UNACH</small></span>
+        </div>
+        <h1 class="auth-mobile-title">Informe Financiero</h1>
+        <div class="auth-card">
+          <div id="login-panel">
+            <h2>Bienvenido</h2>
+            <form id="login-form" class="form-stack">
+              <label for="login-email">Correo electrónico</label>
+              <input id="login-email" name="email" type="email" autocomplete="username" required placeholder="nombre@unach.cl">
+              <label for="login-password">Contraseña</label>
+              <input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="Tu contraseña">
+              <button class="button button-primary button-wide" type="submit">Ingresar al portal <span aria-hidden="true">→</span></button>
+            </form>
+            <p class="auth-switch">¿Primera vez aquí? <button type="button" class="text-button" data-show-register>Solicita acceso</button></p>
+          </div>
+
+          <div id="register-panel" hidden>
+            <h2>Crea tu cuenta</h2>
+            <form id="register-form" class="form-stack">
+              <label for="register-email">Correo electrónico</label>
+              <input id="register-email" name="email" type="email" autocomplete="email" required placeholder="nombre@unach.cl">
+              <label for="register-department">Departamento</label>
+              <select id="register-department" name="department" required>
+                <option value="">Selecciona un departamento</option>
+              </select>
+              <label for="register-password">Contraseña</label>
+              <input id="register-password" name="password" type="password" autocomplete="new-password" minlength="10" required placeholder="Al menos 10 caracteres">
+              <button class="button button-primary button-wide" type="submit">Enviar solicitud <span aria-hidden="true">→</span></button>
+            </form>
+            <p class="auth-switch">¿Ya tienes acceso? <button type="button" class="text-button" data-show-login>Volver al ingreso</button></p>
+          </div>
+
+        </div>
+        <p class="auth-footer">Asociación Centro Sur de Chile · Tesorería</p>
+      </section>
+    </main>
+
+    <div id="app-shell" class="app-shell" hidden>
+      <header class="topbar">
+        <a class="brand" href="#" aria-label="Tesorería UNACH, inicio">
+          <span class="brand-mark" aria-hidden="true">U</span>
+          <span class="brand-word"><strong>Tesorería</strong><small>UNACH</small></span>
+        </a>
+        <div class="topbar-right">
+          <span id="user-badge" class="user-badge"></span>
+          <button id="logout-button" class="icon-button" type="button" aria-label="Cerrar sesión" title="Cerrar sesión">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l5-5-5-5M15 12H3m9-8h7a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-7"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <nav class="main-nav" aria-label="Secciones del informe">
+        <button class="nav-item is-active" type="button" data-view="overview">
+          <span class="nav-icon" aria-hidden="true">◫</span><span>Balance general</span>
+        </button>
+        <button class="nav-item" type="button" data-view="department">
+          <span class="nav-icon" aria-hidden="true">▤</span><span id="department-nav-label">Mi departamento</span>
+        </button>
+        <button class="nav-item admin-nav" type="button" data-view="admin" hidden>
+          <span class="nav-icon" aria-hidden="true">⚙</span><span>Administración</span>
+        </button>
+      </nav>
+
+      <main class="content-wrap">
+        <section id="overview-view" class="view-section">
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">TESORERÍA</span>
+              <h1>Informe Financiero</h1>
+              <p class="muted">Visión consolidada de los departamentos y sus movimientos.</p>
+            </div>
+            <div class="heading-actions">
+              <button class="button button-outline export-button" data-format="pdf" data-view="global" type="button">
+                <span class="file-icon">PDF</span> Descargar informe
+              </button>
+              <button class="button button-soft export-button" data-format="xlsx" data-view="global" type="button" aria-label="Exportar resumen a Excel">
+                Excel
+              </button>
+            </div>
+          </div>
+
+          <div class="filter-bar">
+            <div class="filter-title"><span class="filter-glyph" aria-hidden="true">◷</span><span>Período del informe</span></div>
+            <div class="filter-fields">
+              <label id="global-department-filter" hidden>Departamento<select id="global-department"><option value="">Todos</option></select></label>
+              <label>Desde<input id="global-start" type="date"></label>
+              <span class="date-separator" aria-hidden="true">—</span>
+              <label>Hasta<input id="global-end" type="date"></label>
+              <label class="search-control">Buscar<input id="global-search" type="search" autocomplete="off" placeholder="Departamento, persona, monto o fecha"></label>
+              <button id="global-filter-button" class="button button-primary" type="button">Aplicar</button>
+            </div>
+          </div>
+
+          <article id="global-search-panel" class="panel search-results-panel" hidden>
+            <div class="panel-heading transaction-heading">
+              <div><h2>Coincidencias de movimientos</h2></div>
+              <span id="global-search-count" class="count-pill"></span>
+            </div>
+            <div id="global-search-list" class="transaction-list"></div>
+            <div class="pagination load-more">
+              <span id="global-search-page-label" class="muted"></span>
+              <button id="global-search-more" class="button button-outline" type="button">Mostrar más</button>
+            </div>
+          </article>
+
+          <div id="global-metrics" class="metric-grid" aria-live="polite"></div>
+          <div class="insight-grid">
+            <article class="panel chart-panel">
+              <div class="panel-heading">
+                <div><h2>Ingresos y egresos por mes</h2></div>
+                <span class="chart-legend"><i class="legend-in"></i>Ingresos <i class="legend-out"></i>Egresos</span>
+              </div>
+              <div id="global-chart" class="chart-container"></div>
+            </article>
+            <article class="panel note-panel">
+              <h2>Saldo del período</h2>
+              <p>El saldo inicial considera el balance de apertura y todos los movimientos anteriores al período seleccionado.</p>
+              <div class="equation">
+                <span>Saldo inicial</span><b>+</b><span>Movimientos firmados</span><b>=</b><strong>Saldo final</strong>
+              </div>
+              <p class="note-small">Los importes positivos y negativos siguen el signo de la columna Valor del archivo contable.</p>
+            </article>
+          </div>
+
+          <article id="department-panel" class="panel department-panel">
+            <div class="panel-heading table-heading">
+              <div><h2>Balance por departamento</h2></div>
+              <span id="department-count" class="count-pill"></span>
+            </div>
+            <div class="table-scroll">
+              <table class="data-table">
+                <thead><tr>
+                  <th>Departamento</th><th class="num">Saldo inicial</th><th class="num">Ingresos (+)</th>
+                  <th class="num">Egresos (-)</th><th class="num">Saldo final</th><th class="num">Mov.</th><th></th>
+                </tr></thead>
+                <tbody id="department-rows"></tbody>
+              </table>
+            </div>
+          </article>
+          <p class="scope-footnote">El resumen global no muestra glosas ni nombres de aportantes. El detalle queda limitado por departamento.</p>
+        </section>
+
+        <section id="department-view" class="view-section" hidden>
+          <div class="page-heading">
+            <div>
+              <h1 id="department-title">Mi departamento</h1>
+            </div>
+            <div class="heading-actions">
+              <button class="button button-outline export-button" data-format="pdf" data-view="department" type="button"><span class="file-icon">PDF</span> Descargar informe</button>
+              <button class="button button-soft export-button" data-format="xlsx" data-view="department" type="button">Excel</button>
+            </div>
+          </div>
+          <div class="filter-bar">
+            <div class="filter-title"><span class="filter-glyph" aria-hidden="true">◷</span><span>Filtrar movimientos</span></div>
+            <div class="filter-fields">
+              <label id="detail-department-filter" hidden>Departamento<select id="detail-department"></select></label>
+              <label>Desde<input id="detail-start" type="date"></label>
+              <span class="date-separator" aria-hidden="true">—</span>
+              <label>Hasta<input id="detail-end" type="date"></label>
+              <label class="search-control">Buscar<input id="detail-search" type="search" autocomplete="off" placeholder="Persona, glosa, monto o fecha"></label>
+              <button id="detail-filter-button" class="button button-primary" type="button">Filtrar</button>
+            </div>
+          </div>
+          <div id="detail-metrics" class="metric-grid"></div>
+          <article class="panel">
+            <div class="panel-heading transaction-heading">
+              <div><h2>Movimientos</h2></div>
+              <span id="transaction-count" class="count-pill"></span>
+            </div>
+            <div id="transaction-list" class="transaction-list"></div>
+            <div class="pagination load-more">
+              <span id="page-label" class="muted"></span>
+              <button id="load-more-button" class="button button-outline" type="button">Mostrar más</button>
+            </div>
+          </article>
+          <p class="scope-footnote">Se muestran Fecha Movimiento y Fecha del Evento. El saldo corrido sigue la fecha contable del movimiento.</p>
+        </section>
+
+        <section id="admin-view" class="view-section" hidden>
+          <div class="page-heading">
+            <div>
+              <h1>Administración</h1>
+            </div>
+          </div>
+          <div class="admin-tabs" role="tablist" aria-label="Herramientas del tesorero">
+            <button class="admin-tab is-active" data-admin-tab="users" type="button">Usuarios</button>
+            <button class="admin-tab" data-admin-tab="import" type="button">Cargar contabilidad</button>
+            <button class="admin-tab" data-admin-tab="audit" type="button">Actividad</button>
+          </div>
+          <section id="admin-users-panel" class="admin-panel panel">
+            <div class="panel-heading"><div><h2>Usuarios</h2></div></div>
+            <label class="admin-search">Buscar<input id="users-search" type="search" autocomplete="off" placeholder="Correo, departamento o estado"></label>
+            <div class="admin-list-head" aria-hidden="true"><span>Cuenta</span><span>Registro</span><span>Estado</span><span>Acción</span></div>
+            <div id="users-list" class="admin-list"></div>
+          </section>
+          <section id="admin-import-panel" class="admin-panel panel" hidden>
+            <div class="panel-heading"><div><h2>Importar movimientos</h2></div></div>
+            <p class="muted import-intro">Carga el archivo Excel con las cabeceras estándar. La vista previa valida su estructura y conserva cada fila contable.</p>
+            <form id="import-form" class="upload-zone">
+              <span class="upload-mark" aria-hidden="true">↑</span>
+              <label for="import-file">Seleccionar archivo .xlsx</label>
+              <input id="import-file" name="file" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required>
+              <button class="button button-primary" type="submit">Validar archivo</button>
+            </form>
+            <div id="import-preview" class="import-preview" hidden></div>
+            <div class="import-policy"><strong>Integridad del registro:</strong> no se eliminan filas por coincidencias en fecha, monto o glosa. Cada fila del archivo se incorpora como un movimiento independiente.</div>
+          </section>
+          <section id="admin-audit-panel" class="admin-panel panel" hidden>
+            <div class="panel-heading"><div><h2>Actividad reciente</h2></div></div>
+            <div class="audit-filters">
+              <label>Desde<input id="audit-start" type="date"></label>
+              <label>Hasta<input id="audit-end" type="date"></label>
+              <label>Departamento<select id="audit-department"><option value="">Todos</option></select></label>
+              <label class="search-control">Buscar<input id="audit-search" type="search" autocomplete="off" placeholder="Usuario o acción"></label>
+              <button id="audit-filter-button" class="button button-outline" type="button">Aplicar</button>
+            </div>
+            <div id="audit-list" class="admin-list"></div>
+          </section>
+        </section>
+      </main>
+
+      <footer class="app-footer">
+        <span>Asociación Centro Sur de Chile · Tesorería UNACH</span>
+        <span><i class="status-dot"></i> Sesión protegida</span>
+      </footer>
+    </div>
+  </body>
+</html>
