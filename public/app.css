@@ -50,7 +50,7 @@ a { color: inherit; text-decoration: none; }
   overflow: hidden; color: white; background:
     radial-gradient(ellipse at 16% 92%, rgba(86, 140, 196, .18), transparent 43%),
     linear-gradient(146deg, rgba(8, 37, 72, .7), rgba(18, 59, 112, .66) 67%, rgba(33, 93, 147, .72)),
-    url("/growth-bg.jpg") 28% 58% / cover no-repeat;
+    url("/growth-bg.jpg") 6% 58% / cover no-repeat;
 }
 .brand-light { color: #fff; position: relative; z-index: 1; }
 .brand-light .brand-mark { color: var(--navy); background: #fff; }
