@@ -581,17 +581,7 @@ async function submitImport(event) {
     form.append("file", file);
     const preview = await api("/api/admin/import/preview", { method: "POST", body: form });
     state.importPreview = preview;
-    $("#import-preview").hidden = false;
-    $("#import-preview").innerHTML =
-      '<strong>Vista previa lista</strong><br>' +
-      escapeHTML(preview.filename) + ' · ' + preview.rows.toLocaleString("es-CL") + ' filas validadas.<br>' +
-      (preview.same_file_warning
-        ? '<span class="import-warning">Este archivo exacto ya se cargó antes. La aplicación no borrará movimientos parecidos; confirma solo si quieres incorporar esta copia completa.</span><br>'
-        : '') +
-      escapeHTML(preview.message) +
-      '<br><button id="commit-import" class="button button-primary" type="button">Incorporar ' +
-      preview.rows.toLocaleString("es-CL") + ' movimientos</button>';
-    $("#commit-import").addEventListener("click", commitImport);
+    renderImportPreview(preview);
   } catch (error) {
     toast(error.message, "error");
   } finally {
@@ -600,13 +590,109 @@ async function submitImport(event) {
   }
 }
 
+function renderImportPreview(preview) {
+  const overlapCount = Number(preview.overlap_count || 0);
+  const exactCount = Number(preview.exact_matches || 0);
+  const similarCount = Number(preview.similar_matches || 0);
+  const repeatCount = Number(preview.file_repeats || 0);
+  const matchCount = exactCount + similarCount + repeatCount;
+  const overlapItems = (preview.overlapping_batches || []).map((batch) =>
+    '<li><strong>' + escapeHTML(batch.filename) + '</strong> · ' +
+    shortDate(batch.start) + '–' + shortDate(batch.end) +
+    ' <span class="muted">(se cruza ' + shortDate(batch.overlap_start) + '–' +
+    shortDate(batch.overlap_end) + ')</span></li>'
+  ).join("");
+  const samples = (preview.match_samples || []).map((row) =>
+    '<article class="import-match-card">' +
+      '<div class="import-match-top"><strong>Fila ' + Number(row.file_row) + ' · ' +
+      escapeHTML(row.department) + '</strong><span>' + shortDate(row.date) + ' · ' +
+      escapeHTML(money(row.amount)) + '</span></div>' +
+      '<div class="import-match-description">' +
+      escapeHTML(row.movement_type || "Movimiento") + ' · ' +
+      escapeHTML(row.description || "Sin glosa") +
+      (row.person ? ' · ' + escapeHTML(row.person) : "") + '</div>' +
+      '<small>' + escapeHTML(row.comparison) + ' · Archivo anterior: ' +
+      escapeHTML(row.previous_file) + (row.previous_row ? ' · fila ' + Number(row.previous_row) : "") +
+      (row.department_id || row.previous_department_id
+        ? ' · DEPARTMENT_ID: ' + escapeHTML(row.department_id || "—") +
+          ' / anterior: ' + escapeHTML(row.previous_department_id || "—")
+        : "") + '</small>' +
+    '</article>'
+  ).join("");
+
+  let html = '<strong>Vista previa lista</strong><br>' +
+    escapeHTML(preview.filename) + ' · ' + Number(preview.rows).toLocaleString("es-CL") +
+    ' filas validadas.<br><span class="import-period">Período: ' +
+    shortDate(preview.period.start) + '–' + shortDate(preview.period.end) + '</span>';
+
+  if (preview.same_file_warning) {
+    html += '<div class="import-warning"><strong>Archivo ya incorporado</strong><br>' +
+      'El contenido completo coincide con una carga anterior. Si corresponde, podrás confirmar su incorporación.</div>';
+  }
+
+  if (overlapCount) {
+    html += '<div class="import-warning"><strong>Períodos superpuestos: ' +
+      overlapCount.toLocaleString("es-CL") + ' carga' + (overlapCount === 1 ? "" : "s") +
+      '</strong><br>Compartir fechas no significa que los movimientos sean iguales. Revisa las cargas y las coincidencias antes de continuar.' +
+      '<ul class="import-overlap-list">' + overlapItems + '</ul>' +
+      (preview.overlaps_truncated ? '<small>Se muestran las 8 cargas más recientes con fechas compartidas.</small>' : "") +
+      '</div>' +
+      '<label class="import-confirm"><input id="confirm-import-overlap" type="checkbox">' +
+      '<span>Revisé los períodos y confirmo incorporar el archivo completo.</span></label>';
+  } else {
+    html += '<div class="import-clear">No hay períodos superpuestos con cargas anteriores.</div>';
+  }
+
+  if (matchCount) {
+    html += '<div class="import-warning"><strong>Filas para revisar</strong><ul class="import-match-counts">' +
+      (exactCount ? '<li>' + exactCount.toLocaleString("es-CL") + ' coincidencia' + (exactCount === 1 ? "" : "s") +
+      ' en todos los campos contables conservados.</li>' : "") +
+      (similarCount ? '<li>' + similarCount.toLocaleString("es-CL") +
+      ' posible' + (similarCount === 1 ? "" : "s") + ' coincidencia' + (similarCount === 1 ? "" : "s") +
+      ' en los demás campos; revisar DEPARTMENT_ID.</li>' : "") +
+      (repeatCount ? '<li>' + repeatCount.toLocaleString("es-CL") +
+      ' fila' + (repeatCount === 1 ? "" : "s") + ' idéntica' + (repeatCount === 1 ? "" : "s") +
+      ' dentro del archivo.</li>' : "") + '</ul>' +
+      '<details class="import-match-details"><summary>Revisar filas detectadas' +
+      (preview.samples_truncated ? ' (primeras ' + (preview.match_samples || []).length + ')' : '') +
+      '</summary><div class="import-match-list">' + samples + '</div>' +
+      (preview.samples_truncated ? '<small>Hay más coincidencias que las mostradas. No se excluye ni elimina ninguna fila automáticamente.</small>' : '') +
+      '</details></div>' +
+      '<label class="import-confirm"><input id="confirm-import-matches" type="checkbox">' +
+      '<span>Revisé las filas señaladas y confirmo incorporar todo el archivo, sin excluir movimientos.</span></label>';
+  } else {
+    html += '<div class="import-clear">No se encontraron coincidencias completas ni filas idénticas dentro del archivo.</div>';
+  }
+
+  html += '<p class="import-no-filter">' + escapeHTML(preview.message) + '</p>' +
+    '<button id="commit-import" class="button button-primary" type="button">Incorporar ' +
+    Number(preview.rows).toLocaleString("es-CL") + ' movimientos</button>';
+  const container = $("#import-preview");
+  container.innerHTML = html;
+  container.hidden = false;
+  const updateButton = () => {
+    const overlapConfirmed = !overlapCount || $("#confirm-import-overlap").checked;
+    const matchesConfirmed = !matchCount || $("#confirm-import-matches").checked;
+    $("#commit-import").disabled = !overlapConfirmed || !matchesConfirmed;
+  };
+  [$("#confirm-import-overlap"), $("#confirm-import-matches")].filter(Boolean)
+    .forEach((checkbox) => checkbox.addEventListener("change", updateButton));
+  updateButton();
+  $("#commit-import").addEventListener("click", commitImport);
+}
+
 async function commitImport() {
   if (!state.importPreview) return;
+  const commitButton = $("#commit-import");
+  if (!commitButton || commitButton.disabled) return;
   let confirmSame = false;
   if (state.importPreview.same_file_warning) {
     confirmSame = window.confirm("Ya se importó antes un archivo con el mismo contenido. ¿Deseas incorporar esta copia completa como un nuevo lote?");
     if (!confirmSame) return;
   }
+  const originalLabel = commitButton.textContent;
+  commitButton.disabled = true;
+  commitButton.textContent = "Incorporando…";
   try {
     const result = await api("/api/admin/import/commit", {
       method: "POST",
@@ -614,6 +700,9 @@ async function commitImport() {
       body: JSON.stringify({
         preview_token: state.importPreview.preview_token,
         confirm_same_file: confirmSame,
+        confirm_overlap: !state.importPreview.overlap_count || $("#confirm-import-overlap").checked,
+        confirm_matches: !(state.importPreview.exact_matches || state.importPreview.similar_matches || state.importPreview.file_repeats) ||
+          $("#confirm-import-matches").checked,
       }),
     });
     toast(result.message + " Se incorporaron " + result.rows.toLocaleString("es-CL") + " filas.", "success");
@@ -626,7 +715,19 @@ async function commitImport() {
     populateDepartmentOptions(state.departments);
     loadGlobalReport();
   } catch (error) {
+    if (error.status === 409 && error.payload && error.payload.analysis) {
+      state.importPreview = Object.assign({}, state.importPreview, error.payload.analysis, {
+        same_file_warning: Boolean(error.payload.same_file_warning),
+      });
+      renderImportPreview(state.importPreview);
+      toast("La base cambió durante la revisión. Revisa las advertencias actualizadas.", "error");
+      return;
+    }
     toast(error.message, "error");
+    if (commitButton.isConnected) {
+      commitButton.disabled = false;
+      commitButton.textContent = originalLabel;
+    }
   }
 }
 

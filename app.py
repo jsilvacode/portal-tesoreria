@@ -73,6 +73,24 @@ EXPECTED_HEADERS = (
     "TOTAL BY CURRENCY",
     "Observaciones",
 )
+IMPORT_MATCH_FIELDS = (
+    "department_id",
+    "department_name",
+    "opening_balance",
+    "movement_type_number",
+    "movement_type",
+    "movement_date",
+    "event_date",
+    "amount",
+    "description",
+    "base_person_id",
+    "server_id",
+    "donor_name",
+    "currency",
+    "total_by_currency",
+    "observations",
+)
+IMPORT_MATCH_SAMPLE_LIMIT = 200
 
 
 def utc_now() -> str:
@@ -330,6 +348,7 @@ def create_schema(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             batch_id INTEGER REFERENCES import_batches(id),
             source_row INTEGER NOT NULL,
+            department_id TEXT,
             department_name TEXT NOT NULL REFERENCES departments(name),
             opening_balance INTEGER NOT NULL,
             movement_type_number INTEGER,
@@ -377,6 +396,23 @@ def create_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    if isinstance(conn, PostgresConnection):
+        columns = {
+            row["column_name"]
+            for row in conn.execute(
+                """SELECT column_name FROM information_schema.columns
+                   WHERE table_schema = current_schema() AND table_name = 'transactions'"""
+            ).fetchall()
+        }
+    else:
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()
+    }
+    if "department_id" not in columns:
+        if isinstance(conn, PostgresConnection):
+            conn.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS department_id TEXT")
+        else:
+            conn.execute("ALTER TABLE transactions ADD COLUMN department_id TEXT")
 
 
 def record_audit(
@@ -429,6 +465,7 @@ def import_records_from_xlsx(file_bytes: bytes) -> list[dict]:
             result.append(
                 {
                     "source_row": row_number,
+                    "department_id": normalize_text(raw["DEPARTMENT_ID"]),
                     "department_name": department,
                     "opening_balance": opening,
                     "movement_type_number": type_number,
@@ -454,6 +491,128 @@ def import_records_from_xlsx(file_bytes: bytes) -> list[dict]:
     if not result:
         raise ValueError("No se encontraron movimientos para importar.")
     return result
+
+
+def import_match_key(record: dict, fields=IMPORT_MATCH_FIELDS) -> tuple:
+    return tuple(record.get(field) for field in fields)
+
+
+def import_preview_text(value, limit: int) -> str:
+    return normalize_text(value)[:limit]
+
+
+def import_review_sample(record: dict, match: dict, comparison: str) -> dict:
+    return {
+        "file_row": record["source_row"],
+        "department": record["department_name"],
+        "date": record["movement_date"],
+        "event_date": record["event_date"],
+        "amount": record["amount"],
+        "movement_type": record["movement_type"],
+        "description": import_preview_text(record["description"], 240),
+        "person": import_preview_text(record["donor_name"], 120),
+        "base_person_id": import_preview_text(record["base_person_id"], 80),
+        "server_id": import_preview_text(record["server_id"], 80),
+        "department_id": import_preview_text(record.get("department_id", ""), 80),
+        "comparison": comparison,
+        "previous_file": import_preview_text(match.get("filename", "Carga anterior"), 120),
+        "previous_row": match.get("source_row"),
+        "previous_department_id": import_preview_text(match.get("department_id"), 80),
+    }
+
+
+def analyze_import(conn, records: list[dict]) -> dict:
+    start = min(record["movement_date"] for record in records)
+    end = max(record["movement_date"] for record in records)
+    batches = conn.execute(
+        """SELECT b.id, b.filename, MIN(t.movement_date) AS start,
+                  MAX(t.movement_date) AS end, COUNT(t.id) AS rows
+           FROM import_batches b JOIN transactions t ON t.batch_id = b.id
+           GROUP BY b.id, b.filename
+           HAVING MAX(t.movement_date) >= ? AND MIN(t.movement_date) <= ?
+           ORDER BY MAX(t.movement_date) DESC, b.id DESC""",
+        (start, end),
+    ).fetchall()
+    overlaps = []
+    for batch in batches:
+        overlaps.append(
+            {
+                "filename": batch["filename"],
+                "start": batch["start"],
+                "end": batch["end"],
+                "overlap_start": max(start, batch["start"]),
+                "overlap_end": min(end, batch["end"]),
+                "rows": batch["rows"],
+            }
+        )
+
+    existing_exact = {}
+    existing_without_department_id = {}
+    existing_rows = conn.execute(
+        """SELECT t.department_id, t.department_name, t.opening_balance,
+                  t.movement_type_number, t.movement_type, t.movement_date,
+                  t.event_date, t.amount, t.description, t.base_person_id,
+                  t.server_id, t.donor_name, t.currency, t.total_by_currency,
+                  t.observations, t.source_row, b.filename
+           FROM transactions t LEFT JOIN import_batches b ON b.id = t.batch_id
+           WHERE t.movement_date >= ? AND t.movement_date <= ?""",
+        (start, end),
+    ).fetchall()
+    core_fields = tuple(field for field in IMPORT_MATCH_FIELDS if field != "department_id")
+    for row in existing_rows:
+        stored = dict(row)
+        origin = {
+            "filename": stored.get("filename") or "Carga previa sin archivo asociado",
+            "source_row": stored.get("source_row"),
+            "department_id": stored.get("department_id"),
+        }
+        existing_exact.setdefault(import_match_key(stored), origin)
+        existing_without_department_id.setdefault(import_match_key(stored, core_fields), origin)
+
+    exact_count = 0
+    similar_count = 0
+    internal_repeat_count = 0
+    samples = []
+    file_keys = set()
+    for record in records:
+        exact = existing_exact.get(import_match_key(record))
+        if exact:
+            exact_count += 1
+            if len(samples) < IMPORT_MATCH_SAMPLE_LIMIT:
+                samples.append(import_review_sample(record, exact, "Coincidencia exacta"))
+        else:
+            similar = existing_without_department_id.get(import_match_key(record, core_fields))
+            if similar:
+                similar_count += 1
+                if len(samples) < IMPORT_MATCH_SAMPLE_LIMIT:
+                    samples.append(
+                        import_review_sample(
+                            record,
+                            similar,
+                            "Coincide en los demás campos; revisar DEPARTMENT_ID",
+                        )
+                    )
+        key = import_match_key(record)
+        if key in file_keys:
+            internal_repeat_count += 1
+            if len(samples) < IMPORT_MATCH_SAMPLE_LIMIT:
+                samples.append(
+                    import_review_sample(record, {"filename": "Este mismo archivo"}, "Fila idéntica en el archivo")
+                )
+        else:
+            file_keys.add(key)
+
+    return {
+        "period": {"start": start, "end": end},
+        "overlapping_batches": overlaps[:8],
+        "overlap_count": len(overlaps),
+        "overlaps_truncated": len(overlaps) > 8,
+        "exact_matches": exact_count,
+        "similar_matches": similar_count,
+        "file_repeats": internal_repeat_count,
+        "match_samples": samples,
+        "samples_truncated": exact_count + similar_count + internal_repeat_count > len(samples),
+    }
 
 
 def initialize_database(db_path: Path | str | None = None, source_path: Path | str = SOURCE_PATH) -> None:
@@ -509,13 +668,14 @@ def insert_transaction(conn: sqlite3.Connection, batch_id: int, record: dict) ->
     )
     conn.execute(
         """INSERT INTO transactions(
-           batch_id, source_row, department_name, opening_balance, movement_type_number,
+           batch_id, source_row, department_id, department_name, opening_balance, movement_type_number,
            movement_type, movement_date, event_date, amount, description, base_person_id,
            server_id, donor_name, currency, total_by_currency, observations
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             batch_id,
             record["source_row"],
+            record.get("department_id", ""),
             record["department_name"],
             record["opening_balance"],
             record["movement_type_number"],
@@ -1456,6 +1616,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         previous = conn.execute(
             "SELECT COUNT(*) FROM import_batches WHERE file_sha256 = ?", (file_hash,)
         ).fetchone()[0]
+        analysis = analyze_import(conn, records)
         token = secrets.token_urlsafe(24)
         conn.execute(
             """INSERT INTO import_previews(token, filename, file_sha256, row_count, created_by, created_at)
@@ -1474,7 +1635,16 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             conn,
             actor["id"],
             "import_previewed",
-            {"filename": filename, "rows": len(records), "same_file_warning": bool(previous)},
+            {
+                "filename": filename,
+                "rows": len(records),
+                "same_file_warning": bool(previous),
+                "period": analysis["period"],
+                "overlap_count": analysis["overlap_count"],
+                "exact_matches": analysis["exact_matches"],
+                "similar_matches": analysis["similar_matches"],
+                "file_repeats": analysis["file_repeats"],
+            },
         )
         conn.commit()
         self.send_json(
@@ -1484,7 +1654,8 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 "filename": filename,
                 "rows": len(records),
                 "same_file_warning": bool(previous),
-                "message": "Todas las filas validadas se conservarán, incluso si hay valores parecidos.",
+                "message": "No se eliminarán filas automáticamente; revisa los avisos antes de incorporar.",
+                **analysis,
             },
         )
 
@@ -1504,21 +1675,40 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             "SELECT 1 FROM import_batches WHERE file_sha256 = ? LIMIT 1",
             (preview["file_sha256"],),
         ).fetchone()
-        if existing and not payload.get("confirm_same_file"):
-            self.send_json(
-                409,
-                {
-                    "error": "Este archivo exacto ya fue importado. Confirma si necesitas incorporar otra copia completa.",
-                    "requires_confirmation": True,
-                },
-            )
-            return
         staged = conn.execute(
             "SELECT record_json FROM import_staging WHERE preview_token = ? ORDER BY id",
             (token,),
         ).fetchall()
         if len(staged) != preview["row_count"]:
             raise ValueError("La vista previa está incompleta; vuelve a cargar el archivo.")
+        records = [json.loads(row["record_json"]) for row in staged]
+        analysis = analyze_import(conn, records)
+        required = {
+            "same_file": bool(existing),
+            "overlap": analysis["overlap_count"] > 0,
+            "matches": bool(
+                analysis["exact_matches"]
+                or analysis["similar_matches"]
+                or analysis["file_repeats"]
+            ),
+        }
+        confirmed = {
+            "same_file": bool(payload.get("confirm_same_file")),
+            "overlap": bool(payload.get("confirm_overlap")),
+            "matches": bool(payload.get("confirm_matches")),
+        }
+        if any(required[key] and not confirmed[key] for key in required):
+            needs = [key for key in required if required[key] and not confirmed[key]]
+            self.send_json(
+                409,
+                {
+                    "error": "Revisa el período y las coincidencias detectadas antes de incorporar.",
+                    "requires_confirmation": needs,
+                    "analysis": analysis,
+                    "same_file_warning": bool(existing),
+                },
+            )
+            return
         batch_id = conn.execute(
             """INSERT INTO import_batches(filename, file_sha256, row_count, imported_by, imported_at)
                VALUES (?, ?, ?, ?, ?)""",
@@ -1530,7 +1720,6 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 utc_now(),
             ),
         ).lastrowid
-        records = [json.loads(row["record_json"]) for row in staged]
         known_departments = set()
         for record in records:
             department = record["department_name"]
@@ -1545,6 +1734,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             (
                 batch_id,
                 record["source_row"],
+                record.get("department_id", ""),
                 record["department_name"],
                 record["opening_balance"],
                 record["movement_type_number"],
@@ -1563,10 +1753,10 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             for record in records
         ]
         transaction_sql = """INSERT INTO transactions(
-           batch_id, source_row, department_name, opening_balance, movement_type_number,
+           batch_id, source_row, department_id, department_name, opening_balance, movement_type_number,
            movement_type, movement_date, event_date, amount, description, base_person_id,
            server_id, donor_name, currency, total_by_currency, observations
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
         for start in range(0, len(transaction_rows), 1000):
             conn.executemany(transaction_sql, transaction_rows[start : start + 1000])
         conn.execute("DELETE FROM import_previews WHERE token = ?", (token,))
@@ -1574,10 +1764,26 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             conn,
             actor["id"],
             "import_completed",
-            {"filename": preview["filename"], "rows": preview["row_count"], "batch_id": batch_id},
+            {
+                "filename": preview["filename"],
+                "rows": preview["row_count"],
+                "batch_id": batch_id,
+                "period": analysis["period"],
+                "overlap_count": analysis["overlap_count"],
+                "exact_matches": analysis["exact_matches"],
+                "similar_matches": analysis["similar_matches"],
+                "file_repeats": analysis["file_repeats"],
+            },
         )
         conn.commit()
-        self.send_json(201, {"message": "Importación completada.", "rows": preview["row_count"]})
+        self.send_json(
+            201,
+            {
+                "message": "Importación completada.",
+                "rows": preview["row_count"],
+                "warnings": analysis,
+            },
+        )
 
     def handle_export(self, conn: sqlite3.Connection, query: dict):
         user = self.require_user(conn)
