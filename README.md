@@ -14,3 +14,7 @@ export UNACH_TREASURER_PASSWORD="una-clave-segura-de-12-caracteres"
 ```
 
 Abre `http://127.0.0.1:8000`.
+
+## Vercel + Neon
+
+Conecta el repo en Vercel, instala Neon desde Marketplace y habilita la integración para Production. Configura `UNACH_TREASURER_EMAIL` y `UNACH_TREASURER_PASSWORD` en Production; Neon proporciona `DATABASE_URL`. La primera solicitud crea el esquema y la cuenta de tesorería. Inicia sesión y carga el Excel inicial desde Administración. No subas la planilla, bases locales ni credenciales a GitHub.

@@ -105,6 +105,14 @@ function setAuthMode(mode) {
   $("#register-panel").hidden = mode !== "register";
 }
 
+function populateDepartmentOptions(departments) {
+  const options = (departments || []).map((name) => '<option value="' + escapeHTML(name) + '">' + escapeHTML(name) + '</option>').join("");
+  $("#detail-department").innerHTML = '<option value="">Todos los departamentos</option>' + options;
+  $("#global-department").innerHTML = '<option value="">Todos los departamentos</option>' + options;
+  $("#audit-department").innerHTML = '<option value="">Todos los departamentos</option>' + options;
+  $("#register-department").innerHTML = '<option value="">Selecciona un departamento</option>' + options;
+}
+
 function showApp(user, metadata) {
   state.user = user;
   state.departments = metadata.departments || [];
@@ -119,12 +127,7 @@ function showApp(user, metadata) {
   $$(".admin-nav").forEach((item) => { item.hidden = user.role !== "treasurer"; });
   $("#global-department-filter").hidden = user.role !== "treasurer";
   $("#detail-department-filter").hidden = user.role !== "treasurer";
-  if (user.role === "treasurer") {
-    const options = state.departments.map((name) => '<option value="' + escapeHTML(name) + '">' + escapeHTML(name) + '</option>').join("");
-    $("#detail-department").innerHTML = '<option value="">Todos los departamentos</option>' + options;
-    $("#global-department").innerHTML = '<option value="">Todos los departamentos</option>' + options;
-    $("#audit-department").innerHTML = '<option value="">Todos los departamentos</option>' + options;
-  }
+  populateDepartmentOptions(state.departments);
   ["global-start", "detail-start"].forEach((id) => { $("#" + id).value = metadata.dateRange.start; });
   ["global-end", "detail-end"].forEach((id) => { $("#" + id).value = metadata.dateRange.end; });
   $("#department-title").textContent = user.role === "treasurer" ? "Detalle de movimientos" : user.department_name;
@@ -617,6 +620,10 @@ async function commitImport() {
     state.importPreview = null;
     $("#import-preview").hidden = true;
     $("#import-form").reset();
+    const metadata = await api("/api/me");
+    state.departments = metadata.departments || [];
+    state.dateRange = metadata.dateRange;
+    populateDepartmentOptions(state.departments);
     loadGlobalReport();
   } catch (error) {
     toast(error.message, "error");
@@ -626,12 +633,12 @@ async function commitImport() {
 async function boot() {
   try {
     const departments = await api("/api/departments");
-    $("#register-department").innerHTML = '<option value="">Selecciona un departamento</option>' +
-      departments.departments.map((name) => '<option value="' + escapeHTML(name) + '">' + escapeHTML(name) + '</option>').join("");
+    state.departments = departments.departments || [];
+    populateDepartmentOptions(state.departments);
     const session = await api("/api/me");
     if (session.user) showApp(session.user, session);
   } catch (error) {
-    toast("No se pudo conectar con el servidor local.", "error");
+    toast("No se pudo conectar con el servicio.", "error");
   }
 }
 
