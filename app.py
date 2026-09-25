@@ -1530,8 +1530,45 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 utc_now(),
             ),
         ).lastrowid
-        for staged_row in staged:
-            insert_transaction(conn, batch_id, json.loads(staged_row["record_json"]))
+        records = [json.loads(row["record_json"]) for row in staged]
+        known_departments = set()
+        for record in records:
+            department = record["department_name"]
+            if department not in known_departments:
+                conn.execute(
+                    """INSERT OR IGNORE INTO departments(name, opening_balance, currency)
+                       VALUES (?, ?, ?)""",
+                    (department, record["opening_balance"], record["currency"]),
+                )
+                known_departments.add(department)
+        transaction_rows = [
+            (
+                batch_id,
+                record["source_row"],
+                record["department_name"],
+                record["opening_balance"],
+                record["movement_type_number"],
+                record["movement_type"],
+                record["movement_date"],
+                record["event_date"],
+                record["amount"],
+                record["description"],
+                record["base_person_id"],
+                record["server_id"],
+                record["donor_name"],
+                record["currency"],
+                record["total_by_currency"],
+                record["observations"],
+            )
+            for record in records
+        ]
+        transaction_sql = """INSERT INTO transactions(
+           batch_id, source_row, department_name, opening_balance, movement_type_number,
+           movement_type, movement_date, event_date, amount, description, base_person_id,
+           server_id, donor_name, currency, total_by_currency, observations
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        for start in range(0, len(transaction_rows), 1000):
+            conn.executemany(transaction_sql, transaction_rows[start : start + 1000])
         conn.execute("DELETE FROM import_previews WHERE token = ?", (token,))
         record_audit(
             conn,
