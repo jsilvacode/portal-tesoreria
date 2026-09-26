@@ -58,6 +58,10 @@ MAX_UPLOAD_BYTES = 4 * 1024 * 1024 if os.environ.get("VERCEL") else 25 * 1024 * 
 MAX_IMPORT_ROWS = 50_000
 PBKDF2_ITERATIONS = 310_000
 LOCAL_TIMEZONE = ZoneInfo("America/Santiago")
+MONTH_NAMES_ES = (
+    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+)
 EXPECTED_HEADERS = (
     "DEPARTMENT_ID",
     "Nombre del Departamento",
@@ -713,6 +717,68 @@ def period_bounds(conn: sqlite3.Connection, start: str | None, end: str | None) 
     return start, end
 
 
+def parse_calendar_filters(year_value: str | None, month_value: str | None) -> tuple[int | None, list[int] | None]:
+    year = None
+    if year_value:
+        if not re.fullmatch(r"\d{4}", year_value):
+            raise ValueError("El año seleccionado no es válido.")
+        year = int(year_value)
+        if year < 1:
+            raise ValueError("El año seleccionado no es válido.")
+    months = None
+    if month_value:
+        try:
+            parsed = [int(value) for value in month_value.split(",") if value]
+        except ValueError as exc:
+            raise ValueError("Los meses seleccionados no son válidos.") from exc
+        if any(value < 1 or value > 12 for value in parsed):
+            raise ValueError("Los meses deben estar entre enero y diciembre.")
+        months = sorted(set(parsed)) or None
+    return year, months
+
+
+def selected_period_intervals(
+    start: str,
+    end: str,
+    year: int | None = None,
+    months: list[int] | None = None,
+) -> list[tuple[str, str]]:
+    first = date.fromisoformat(start)
+    last = date.fromisoformat(end)
+    if year is not None:
+        first = max(first, date(year, 1, 1))
+        last = min(last, date(year, 12, 31))
+    if first > last:
+        return []
+    if not months:
+        return [(first.isoformat(), last.isoformat())]
+    selected = set(months)
+    intervals = []
+    cursor = first.replace(day=1)
+    last_month = last.replace(day=1)
+    while cursor <= last_month:
+        if cursor.month in selected:
+            month_end = date(cursor.year, cursor.month, calendar.monthrange(cursor.year, cursor.month)[1])
+            interval_start = max(first, cursor)
+            interval_end = min(last, month_end)
+            intervals.append((interval_start.isoformat(), interval_end.isoformat()))
+        next_year = cursor.year + (1 if cursor.month == 12 else 0)
+        next_month = 1 if cursor.month == 12 else cursor.month + 1
+        cursor = date(next_year, next_month, 1)
+    return intervals
+
+
+def intervals_sql(column: str, intervals: list[tuple[str, str]]) -> tuple[str, list[str]]:
+    if not intervals:
+        return "0", []
+    parts = []
+    parameters = []
+    for interval_start, interval_end in intervals:
+        parts.append("(" + column + " >= ? AND " + column + " <= ?)")
+        parameters.extend((interval_start, interval_end))
+    return "(" + " OR ".join(parts) + ")", parameters
+
+
 def resolve_summary_department(user: dict, requested: str | None, view: str) -> str | None:
     if user["role"] == "treasurer":
         return requested
@@ -729,7 +795,13 @@ def get_summary(
     start: str,
     end: str,
     department_name: str | None = None,
+    year: int | None = None,
+    months: list[int] | None = None,
 ) -> dict:
+    intervals = selected_period_intervals(start, end, year, months)
+    period_start = intervals[0][0] if intervals else start
+    period_end = intervals[-1][1] if intervals else end
+    movement_period, movement_period_params = intervals_sql("movement_date", intervals)
     departments = conn.execute(
         "SELECT name, opening_balance, currency FROM departments ORDER BY name"
     ).fetchall()
@@ -737,13 +809,14 @@ def get_summary(
         departments = [row for row in departments if row["name"] == department_name]
         if not departments:
             raise ValueError("Departamento no encontrado.")
+    opening_by_department = {row["name"]: int(row["opening_balance"]) for row in departments}
     summaries = []
     for department in departments:
         name = department["name"]
         before = conn.execute(
             """SELECT COALESCE(SUM(amount), 0) AS amount
                FROM transactions WHERE department_name = ? AND movement_date < ?""",
-            (name, start),
+            (name, period_start),
         ).fetchone()["amount"]
         current = conn.execute(
             """SELECT
@@ -752,8 +825,8 @@ def get_summary(
                  COALESCE(SUM(amount), 0) AS net,
                  COUNT(*) AS rows
                FROM transactions
-               WHERE department_name = ? AND movement_date >= ? AND movement_date <= ?""",
-            (name, start, end),
+               WHERE department_name = ? AND """ + movement_period,
+            [name, *movement_period_params],
         ).fetchone()
         opening = int(department["opening_balance"]) + int(before)
         net = int(current["net"])
@@ -765,7 +838,7 @@ def get_summary(
                 "inflow": int(current["inflow"]),
                 "outflow": int(current["outflow"]),
                 "net": net,
-                "closing": opening + net,
+                "closing": int(department["opening_balance"]),
                 "rows": int(current["rows"]),
             }
         )
@@ -782,43 +855,91 @@ def get_summary(
              COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) AS outflow,
              COALESCE(SUM(amount), 0) AS net
            FROM transactions
-           WHERE movement_date >= ? AND movement_date <= ?"""
-    monthly_parameters = [start, end]
+           WHERE """ + movement_period
+    monthly_parameters = list(movement_period_params)
     if department_name is not None:
         monthly_sql += " AND department_name = ?"
         monthly_parameters.append(department_name)
     monthly_sql += " GROUP BY substr(movement_date, 1, 7) ORDER BY month"
     monthly_query = conn.execute(monthly_sql, monthly_parameters).fetchall()
     monthly_map = {row["month"]: row for row in monthly_query}
-    month_cursor = date.fromisoformat(start).replace(day=1)
-    last_month = date.fromisoformat(end).replace(day=1)
-    running_closing = totals["opening"]
+    month_cutoffs = {}
+    for interval_start, interval_end in intervals:
+        month_cursor = date.fromisoformat(interval_start).replace(day=1)
+        last_month = date.fromisoformat(interval_end).replace(day=1)
+        while month_cursor <= last_month:
+            key = month_cursor.strftime("%Y-%m")
+            month_end = date(
+                month_cursor.year,
+                month_cursor.month,
+                calendar.monthrange(month_cursor.year, month_cursor.month)[1],
+            )
+            month_cutoffs[key] = min(date.fromisoformat(interval_end), month_end).isoformat()
+            next_year = month_cursor.year + (1 if month_cursor.month == 12 else 0)
+            next_month = 1 if month_cursor.month == 12 else month_cursor.month + 1
+            month_cursor = date(next_year, next_month, 1)
+    non_contiguous = any(
+        date.fromisoformat(intervals[index][0])
+        > date.fromisoformat(intervals[index - 1][1]) + timedelta(days=1)
+        for index in range(1, len(intervals))
+    )
+    empty_selection = not intervals and (year is not None or bool(months))
+    balance_sql = """SELECT department_name, substr(movement_date, 1, 7) AS month,
+                      COALESCE(SUM(amount), 0) AS net
+                    FROM transactions WHERE movement_date <= ?"""
+    balance_parameters: list = [period_end]
+    if department_name is not None:
+        balance_sql += " AND department_name = ?"
+        balance_parameters.append(department_name)
+    balance_sql += " GROUP BY department_name, substr(movement_date, 1, 7) ORDER BY month, department_name"
+    balance_rows = conn.execute(balance_sql, balance_parameters).fetchall()
+    department_month_movements: dict[str, dict[str, int]] = {}
+    for row in balance_rows:
+        department_month_movements.setdefault(row["month"], {})[row["department_name"]] = int(row["net"])
+
+    running_balances = dict(opening_by_department)
+    monthly_closings = {}
+    balance_months = sorted(set(department_month_movements) | set(month_cutoffs))
+    for key in balance_months:
+        for name, amount in department_month_movements.get(key, {}).items():
+            if name in running_balances:
+                running_balances[name] += amount
+        if key in month_cutoffs:
+            monthly_closings[key] = sum(running_balances.values())
+
+    summaries_by_department = {item["department"]: item for item in summaries}
+    for name, closing in running_balances.items():
+        if name in summaries_by_department:
+            summaries_by_department[name]["closing"] = closing
+    totals["closing"] = sum(item["closing"] for item in summaries)
+
     monthly = []
-    while month_cursor <= last_month:
-        key = month_cursor.strftime("%Y-%m")
+    for key in sorted(month_cutoffs):
         row = monthly_map.get(key)
         incoming = int(row["inflow"]) if row else 0
         outgoing = int(row["outflow"]) if row else 0
         net = int(row["net"]) if row else 0
-        running_closing += net
         monthly.append(
             {
                 "month": key,
                 "inflow": incoming,
                 "outflow": outgoing,
                 "net": net,
-                "closing": running_closing,
+                "closing": monthly_closings.get(key, sum(opening_by_department.values())),
             }
         )
-        year = month_cursor.year + (1 if month_cursor.month == 12 else 0)
-        month = 1 if month_cursor.month == 12 else month_cursor.month + 1
-        month_cursor = date(year, month, 1)
     return {
-        "period": {"start": start, "end": end},
+        "period": {"start": period_start, "end": period_end},
         "totals": totals,
         "departments": summaries,
         "monthly": monthly,
         "scope": department_name or "global",
+        "filters": {
+            "year": year,
+            "months": months or [],
+            "nonContiguous": non_contiguous,
+            "emptySelection": empty_selection,
+        },
     }
 
 
@@ -828,9 +949,13 @@ def get_transactions(
     end: str,
     department_name: str | None = None,
     search: str | None = None,
+    year: int | None = None,
+    months: list[int] | None = None,
 ) -> list[dict]:
-    where = ["movement_date >= ?", "movement_date <= ?"]
-    params: list = [start, end]
+    intervals = selected_period_intervals(start, end, year, months)
+    period_end = intervals[-1][1] if intervals else end
+    where = ["movement_date <= ?"]
+    params: list = [period_end]
     if department_name is not None:
         where.append("department_name = ?")
         params.append(department_name)
@@ -841,31 +966,20 @@ def get_transactions(
            FROM transactions WHERE """ + " AND ".join(where) + " ORDER BY movement_date, id",
         params,
     ).fetchall()
-    if department_name is None:
-        opening = conn.execute(
-            "SELECT COALESCE(SUM(opening_balance), 0) FROM departments"
-        ).fetchone()[0]
-        before = conn.execute(
-            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE movement_date < ?",
-            (start,),
-        ).fetchone()[0]
-    else:
-        dept = conn.execute(
-            "SELECT opening_balance FROM departments WHERE name = ?", (department_name,)
-        ).fetchone()
-        opening = int(dept["opening_balance"]) if dept else 0
-        before = conn.execute(
-            """SELECT COALESCE(SUM(amount), 0) FROM transactions
-               WHERE department_name = ? AND movement_date < ?""",
-            (department_name, start),
-        ).fetchone()[0]
-    running = int(opening) + int(before)
+    opening = conn.execute(
+        "SELECT COALESCE(SUM(opening_balance), 0) FROM departments"
+        + (" WHERE name = ?" if department_name is not None else ""),
+        (department_name,) if department_name is not None else (),
+    ).fetchone()[0]
+    running = int(opening)
     result = []
     for row in rows:
         running += int(row["amount"])
-        item = dict(row)
-        item["running_balance"] = running
-        result.append(item)
+        movement_date = row["movement_date"]
+        if any(interval_start <= movement_date <= interval_end for interval_start, interval_end in intervals):
+            item = dict(row)
+            item["running_balance"] = running
+            result.append(item)
     result.reverse()
     if search:
         def normalized(value):
@@ -906,6 +1020,16 @@ def format_clp(value: int) -> str:
     return sign + formatted
 
 
+def summary_filter_caption(summary: dict) -> str:
+    filters = summary.get("filters", {})
+    parts = []
+    if filters.get("year"):
+        parts.append("Año " + str(filters["year"]))
+    if filters.get("months"):
+        parts.append("Meses: " + ", ".join(MONTH_NAMES_ES[int(month) - 1] for month in filters["months"]))
+    return " · ".join(parts)
+
+
 def export_xlsx(summary: dict, transactions: list[dict] | None) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
@@ -913,8 +1037,20 @@ def export_xlsx(summary: dict, transactions: list[dict] | None) -> bytes:
     navy = "174A8B"
     pale = "EAF1FA"
     sheet.append(["Tesorería UNACH", "Balance financiero"])
-    sheet.append(["Período", summary["period"]["start"] + " al " + summary["period"]["end"]])
-    sheet.append([])
+    period_caption = summary["period"]["start"] + " al " + summary["period"]["end"]
+    filter_caption = summary_filter_caption(summary)
+    if filter_caption:
+        period_caption += " · " + filter_caption
+    sheet.append(["Período", period_caption])
+    if summary.get("filters", {}).get("emptySelection"):
+        sheet.append(["Selección", "No hay períodos dentro del rango de fechas con la selección de año y meses aplicada."])
+    elif summary.get("filters", {}).get("nonContiguous"):
+        sheet.append([
+            "Criterio de saldo",
+            "El movimiento neto suma solo los meses seleccionados; el saldo final incluye todos los movimientos hasta la última fecha incluida.",
+        ])
+    else:
+        sheet.append([])
     sheet.append(["Concepto", "Monto (CLP)"])
     total_names = [
         ("opening", "Saldo inicial"),
@@ -1059,18 +1195,34 @@ def export_pdf(summary: dict, transactions: list[dict] | None) -> bytes:
     styles.add(
         ParagraphStyle(name="CellRight", parent=styles["Cell"], alignment=TA_RIGHT)
     )
+    period_caption = "{} al {}".format(
+        date.fromisoformat(summary["period"]["start"]).strftime("%d/%m/%Y"),
+        date.fromisoformat(summary["period"]["end"]).strftime("%d/%m/%Y"),
+    )
+    filter_caption = summary_filter_caption(summary)
+    if filter_caption:
+        period_caption += " | " + filter_caption
     story = [
         Paragraph("Tesorería UNACH", styles["ReportTitle"]),
         Paragraph(
-            "{} | {} al {}".format(
+            "{} | {}".format(
                 "Balance general" if summary["scope"] == "global" else "Departamento: " + html.escape(summary["scope"]),
-                date.fromisoformat(summary["period"]["start"]).strftime("%d/%m/%Y"),
-                date.fromisoformat(summary["period"]["end"]).strftime("%d/%m/%Y"),
+                html.escape(period_caption),
             ),
             styles["ReportMeta"],
         ),
-        Spacer(1, 7 * mm),
     ]
+    if summary.get("filters", {}).get("emptySelection"):
+        story.append(Paragraph(
+            "No hay períodos dentro del rango de fechas con la selección de año y meses aplicada.",
+            styles["ReportMeta"],
+        ))
+    elif summary.get("filters", {}).get("nonContiguous"):
+        story.append(Paragraph(
+            "El movimiento neto suma solo los meses seleccionados; el saldo final incluye todos los movimientos hasta la última fecha incluida.",
+            styles["ReportMeta"],
+        ))
+    story.append(Spacer(1, 7 * mm))
     total = summary["totals"]
     cards = [
         ["Saldo inicial", "Ingresos (+)", "Egresos (-)", "Movimiento neto", "Saldo final"],
@@ -1327,11 +1479,18 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 if not user:
                     return
                 start, end = period_bounds(conn, (query.get("start") or [None])[0], (query.get("end") or [None])[0])
+                year, months = parse_calendar_filters(
+                    (query.get("year") or [None])[0],
+                    (query.get("months") or [None])[0],
+                )
                 requested = (query.get("department") or [None])[0]
                 view = (query.get("view") or ["global"])[0]
                 scope = resolve_summary_department(user, requested, view)
-                report = get_summary(conn, start, end, scope)
-                record_audit(conn, user["id"], "report_viewed", {"scope": scope or "global", "start": start, "end": end})
+                report = get_summary(conn, start, end, scope, year, months)
+                record_audit(conn, user["id"], "report_viewed", {
+                    "scope": scope or "global", "start": start, "end": end,
+                    "year": year, "months": months or [],
+                })
                 conn.commit()
                 self.send_json(200, report)
             elif parsed.path == "/api/transactions":
@@ -1348,11 +1507,18 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 else:
                     scope = requested
                 search = ((query.get("q") or [""])[0] or "").strip()[:120]
-                rows = get_transactions(conn, start, end, scope, search or None)
+                year, months = parse_calendar_filters(
+                    (query.get("year") or [None])[0],
+                    (query.get("months") or [None])[0],
+                )
+                rows = get_transactions(conn, start, end, scope, search or None, year, months)
                 page = max(1, int((query.get("page") or ["1"])[0]))
                 page_size = 25
                 if not search:
-                    record_audit(conn, user["id"], "transactions_viewed", {"scope": scope or "all_departments", "start": start, "end": end})
+                    record_audit(conn, user["id"], "transactions_viewed", {
+                        "scope": scope or "all_departments", "start": start, "end": end,
+                        "year": year, "months": months or [],
+                    })
                     conn.commit()
                 total = len(rows)
                 first = (page - 1) * page_size
@@ -1807,6 +1973,10 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         if not user:
             return
         start, end = period_bounds(conn, (query.get("start") or [None])[0], (query.get("end") or [None])[0])
+        year, months = parse_calendar_filters(
+            (query.get("year") or [None])[0],
+            (query.get("months") or [None])[0],
+        )
         requested = (query.get("department") or [None])[0]
         view = (query.get("view") or ["global"])[0]
         format_name = (query.get("format") or ["xlsx"])[0].lower()
@@ -1820,17 +1990,20 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 return
         else:
             scope = requested
-        summary = get_summary(conn, start, end, scope)
+        summary = get_summary(conn, start, end, scope, year, months)
         include_detail = view == "department" or (
             user["role"] == "treasurer" and view == "all_detail"
         )
-        rows = get_transactions(conn, start, end, scope) if include_detail else None
+        rows = get_transactions(conn, start, end, scope, None, year, months) if include_detail else None
         event = "export_pdf" if format_name == "pdf" else "export_xlsx"
         record_audit(
             conn,
             user["id"],
             event,
-            {"scope": scope or "global", "view": view, "start": start, "end": end},
+            {
+                "scope": scope or "global", "view": view, "start": start, "end": end,
+                "year": year, "months": months or [],
+            },
         )
         conn.commit()
         label = scope or ("todos-los-departamentos" if include_detail else "general")

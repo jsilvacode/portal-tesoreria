@@ -114,9 +114,25 @@
           </div>
 
           <div class="filter-bar">
-            <div class="filter-title"><span class="filter-glyph" aria-hidden="true">◷</span><span>Período del informe</span></div>
-            <div class="filter-fields">
+            <div class="filter-head">
+              <div class="filter-title"><span class="filter-glyph" aria-hidden="true">◷</span><span>Período del informe</span></div>
+              <div class="period-shortcuts" role="group" aria-label="Períodos rápidos">
+                <button type="button" data-period-view="global" data-period-preset="all">Todo</button>
+                <button type="button" data-period-view="global" data-period-preset="30">30 días</button>
+                <button type="button" data-period-view="global" data-period-preset="90">90 días</button>
+                <button type="button" data-period-view="global" data-period-preset="year">Año actual</button>
+              </div>
+            </div>
+            <div id="global-filter-fields" class="filter-fields">
               <label id="global-department-filter" hidden>Departamento<select id="global-department"><option value="">Todos</option></select></label>
+              <label class="year-filter">Año<select id="global-year"><option value="">Todos</option></select></label>
+              <details class="month-selector">
+                <summary id="global-month-summary">Todos los meses</summary>
+                <div class="month-selector-panel">
+                  <div class="month-selector-actions"><button type="button" data-month-action="all" data-month-view="global">Seleccionar todos</button><button type="button" data-month-action="clear" data-month-view="global">Quitar selección</button></div>
+                  <div id="global-month-options" class="month-selector-options"></div>
+                </div>
+              </details>
               <label>Desde<input id="global-start" type="date"></label>
               <span class="date-separator" aria-hidden="true">—</span>
               <label>Hasta<input id="global-end" type="date"></label>
@@ -148,11 +164,11 @@
             </article>
             <article class="panel note-panel">
               <h2>Saldo del período</h2>
-              <p>El saldo inicial considera el balance de apertura y todos los movimientos anteriores al período seleccionado.</p>
-              <div class="equation">
+              <p id="balance-note-text">El saldo inicial considera el balance de apertura y todos los movimientos anteriores al período seleccionado.</p>
+              <div id="balance-equation" class="equation">
                 <span>Saldo inicial</span><b>+</b><span>Movimientos firmados</span><b>=</b><strong>Saldo final</strong>
               </div>
-              <p class="note-small">Los importes positivos y negativos siguen el signo de la columna Valor del archivo contable.</p>
+              <p id="balance-note-small" class="note-small">Los importes positivos y negativos siguen el signo de la columna Valor del archivo contable.</p>
             </article>
           </div>
 
@@ -185,9 +201,25 @@
             </div>
           </div>
           <div class="filter-bar">
-            <div class="filter-title"><span class="filter-glyph" aria-hidden="true">◷</span><span>Filtrar movimientos</span></div>
-            <div class="filter-fields">
+            <div class="filter-head">
+              <div class="filter-title"><span class="filter-glyph" aria-hidden="true">◷</span><span>Filtrar movimientos</span></div>
+              <div class="period-shortcuts" role="group" aria-label="Períodos rápidos">
+                <button type="button" data-period-view="detail" data-period-preset="all">Todo</button>
+                <button type="button" data-period-view="detail" data-period-preset="30">30 días</button>
+                <button type="button" data-period-view="detail" data-period-preset="90">90 días</button>
+                <button type="button" data-period-view="detail" data-period-preset="year">Año actual</button>
+              </div>
+            </div>
+            <div id="detail-filter-fields" class="filter-fields">
               <label id="detail-department-filter" hidden>Departamento<select id="detail-department"></select></label>
+              <label class="year-filter">Año<select id="detail-year"><option value="">Todos</option></select></label>
+              <details class="month-selector">
+                <summary id="detail-month-summary">Todos los meses</summary>
+                <div class="month-selector-panel">
+                  <div class="month-selector-actions"><button type="button" data-month-action="all" data-month-view="detail">Seleccionar todos</button><button type="button" data-month-action="clear" data-month-view="detail">Quitar selección</button></div>
+                  <div id="detail-month-options" class="month-selector-options"></div>
+                </div>
+              </details>
               <label>Desde<input id="detail-start" type="date"></label>
               <span class="date-separator" aria-hidden="true">—</span>
               <label>Hasta<input id="detail-end" type="date"></label>

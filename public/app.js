@@ -2,6 +2,7 @@ const state = {
   user: null,
   departments: [],
   dateRange: null,
+  period: { start: "", end: "", year: "", months: [], preset: "all" },
   globalReport: null,
   detailReport: null,
   selectedDepartment: null,
@@ -10,6 +11,7 @@ const state = {
   transactionTotal: 0,
   transactionLoading: false,
   transactionRequest: 0,
+  globalReportRequest: 0,
   detailSearchTimer: null,
   globalSearchTimer: null,
   globalSearchRequest: 0,
@@ -113,6 +115,103 @@ function populateDepartmentOptions(departments) {
   $("#register-department").innerHTML = '<option value="">Selecciona un departamento</option>' + options;
 }
 
+const monthNames = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+const monthShortNames = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
+
+function renderMonthOptions(prefix) {
+  $("#" + prefix + "-month-options").innerHTML = monthShortNames.map((name, index) =>
+    '<button type="button" data-month-view="' + prefix + '" data-month-option="' + (index + 1) + '" aria-label="' + monthNames[index] + '" aria-pressed="false">' + name + '</button>'
+  ).join("");
+}
+
+function syncPeriodControls() {
+  ["global", "detail"].forEach((prefix) => {
+    $("#" + prefix + "-start").value = state.period.start || "";
+    $("#" + prefix + "-end").value = state.period.end || "";
+    $("#" + prefix + "-year").value = state.period.year || "";
+    const selected = new Set(state.period.months || []);
+    $$("[data-month-option]", $("#" + prefix + "-month-options")).forEach((button) => {
+      button.setAttribute("aria-pressed", selected.has(Number(button.dataset.monthOption)) ? "true" : "false");
+    });
+    const months = state.period.months || [];
+    const summary = months.length === 0 || months.length === 12
+      ? "Meses · todos"
+      : months.length === 1
+        ? "Meses · " + monthNames[months[0] - 1]
+        : "Meses · " + months.length + " seleccionados";
+    $("#" + prefix + "-month-summary").textContent = summary;
+    $$('[data-period-view="' + prefix + '"]').forEach((button) => {
+      button.classList.toggle("is-active", state.period.preset === button.dataset.periodPreset);
+    });
+  });
+}
+
+function initializePeriodControls(range) {
+  const start = range && range.start ? range.start : "";
+  const end = range && range.end ? range.end : "";
+  const firstYear = start ? Number(start.slice(0, 4)) : (new Date()).getFullYear();
+  const lastYear = end ? Number(end.slice(0, 4)) : firstYear;
+  const years = [];
+  for (let year = lastYear; year >= firstYear; year -= 1) years.push(year);
+  ["global", "detail"].forEach((prefix) => {
+    const options = years.map((year) => '<option value="' + year + '">' + year + '</option>').join("");
+    $("#" + prefix + "-year").innerHTML = '<option value="">Todos</option>' + options;
+    renderMonthOptions(prefix);
+  });
+  state.period = { start, end, year: "", months: [], preset: "all" };
+  syncPeriodControls();
+}
+
+function readPeriodControls(prefix) {
+  const start = $("#" + prefix + "-start").value;
+  const end = $("#" + prefix + "-end").value;
+  if (start && end && start > end) {
+    toast("La fecha inicial debe ser anterior a la fecha final.", "error");
+    return null;
+  }
+  const months = $$("[data-month-option][aria-pressed='true']", $("#" + prefix + "-month-options"))
+    .map((button) => Number(button.dataset.monthOption));
+  state.period = {
+    start,
+    end,
+    year: $("#" + prefix + "-year").value,
+    months,
+    preset: state.period.preset || "custom",
+  };
+  syncPeriodControls();
+  return state.period;
+}
+
+function isoDate(dateValue) {
+  return [dateValue.getFullYear(), String(dateValue.getMonth() + 1).padStart(2, "0"), String(dateValue.getDate()).padStart(2, "0")].join("-");
+}
+
+function applyPeriodPreset(prefix, preset) {
+  const availableStart = state.dateRange && state.dateRange.start ? state.dateRange.start : isoDate(new Date());
+  const availableEnd = state.dateRange && state.dateRange.end ? state.dateRange.end : isoDate(new Date());
+  let start = availableStart;
+  let end = availableEnd;
+  let year = "";
+  let months = [];
+  const anchor = new Date(availableEnd + "T12:00:00");
+  if (preset === "30" || preset === "90") {
+    anchor.setDate(anchor.getDate() - (Number(preset) - 1));
+    start = isoDate(anchor);
+  } else if (preset === "year") {
+    const currentYear = String((new Date()).getFullYear());
+    year = Array.from($("#" + prefix + "-year").options).some((option) => option.value === currentYear)
+      ? currentYear : String(availableEnd.slice(0, 4));
+    start = year + "-01-01";
+    end = year + "-12-31";
+    if (availableStart && availableStart > start) start = availableStart;
+    if (availableEnd && availableEnd < end) end = availableEnd;
+  }
+  state.period = { start, end, year, months, preset };
+  syncPeriodControls();
+  if (prefix === "global") loadGlobalReport();
+  else loadDepartmentReport();
+}
+
 function showApp(user, metadata) {
   state.user = user;
   state.departments = metadata.departments || [];
@@ -127,9 +226,10 @@ function showApp(user, metadata) {
   $$(".admin-nav").forEach((item) => { item.hidden = user.role !== "treasurer"; });
   $("#global-department-filter").hidden = user.role !== "treasurer";
   $("#detail-department-filter").hidden = user.role !== "treasurer";
+  $("#global-filter-fields").classList.toggle("has-department-filter", user.role === "treasurer");
+  $("#detail-filter-fields").classList.toggle("has-department-filter", user.role === "treasurer");
   populateDepartmentOptions(state.departments);
-  ["global-start", "detail-start"].forEach((id) => { $("#" + id).value = metadata.dateRange.start; });
-  ["global-end", "detail-end"].forEach((id) => { $("#" + id).value = metadata.dateRange.end; });
+  initializePeriodControls(metadata.dateRange || {});
   $("#department-title").textContent = user.role === "treasurer" ? "Detalle de movimientos" : user.department_name;
   state.currentView = "overview";
   updateNav();
@@ -153,13 +253,14 @@ function updateNav() {
 }
 
 function periodQuery(prefix) {
-  const start = $("#" + prefix + "-start").value;
-  const end = $("#" + prefix + "-end").value;
-  if (start && end && start > end) {
-    toast("La fecha inicial debe ser anterior a la fecha final.", "error");
-    return null;
-  }
-  return "start=" + encodeURIComponent(start) + "&end=" + encodeURIComponent(end);
+  const period = readPeriodControls(prefix);
+  if (!period) return null;
+  const params = new URLSearchParams();
+  if (period.start) params.set("start", period.start);
+  if (period.end) params.set("end", period.end);
+  if (period.year) params.set("year", period.year);
+  if (period.months.length && period.months.length < 12) params.set("months", period.months.join(","));
+  return params.toString();
 }
 
 function metricHTML(label, value, tone, context) {
@@ -186,6 +287,18 @@ function renderMetrics(container, report) {
     metricHTML("Movimiento neto", totals.net, totals.net < 0 ? "metric-negative" : "metric-positive", "Suma firmada de Valor"),
     metricHTML("Saldo final", totals.closing, "metric-navy", totals.rows.toLocaleString("es-CL") + " movimientos"),
   ].join("");
+}
+
+function updateBalanceNote(report) {
+  const separatedMonths = Boolean(report.filters && report.filters.nonContiguous);
+  const emptySelection = Boolean(report.filters && report.filters.emptySelection);
+  $("#balance-equation").hidden = separatedMonths || emptySelection;
+  $("#balance-note-small").hidden = separatedMonths || emptySelection;
+  $("#balance-note-text").textContent = emptySelection
+    ? "No hay períodos dentro del rango de fechas con la selección de año y meses aplicada."
+    : separatedMonths
+      ? "El movimiento neto suma los meses seleccionados. El saldo final refleja el balance real hasta la última fecha incluida."
+      : "El saldo inicial considera el balance de apertura y todos los movimientos anteriores al período seleccionado.";
 }
 
 function renderChart(container, months) {
@@ -289,17 +402,21 @@ function renderDepartmentRows(report) {
 async function loadGlobalReport() {
   const period = periodQuery("global");
   if (!period) return;
+  const requestId = ++state.globalReportRequest;
   const department = state.user.role === "treasurer" ? $("#global-department").value : "";
   const query = period + (department ? "&department=" + encodeURIComponent(department) : "");
   $("#global-metrics").innerHTML = '<div class="loading">Actualizando balance…</div>';
   try {
     const report = await api("/api/summary?" + query);
+    if (requestId !== state.globalReportRequest) return;
     state.globalReport = report;
     renderMetrics($("#global-metrics"), report);
+    updateBalanceNote(report);
     renderChart($("#global-chart"), report.monthly);
     renderDepartmentRows(report);
     if ($("#global-search").value.trim()) loadGlobalSearch();
   } catch (error) {
+    if (requestId !== state.globalReportRequest) return;
     toast(error.message, "error");
     if (error.status === 401) showAuth();
   }
@@ -353,12 +470,14 @@ async function loadGlobalSearch(append = false) {
 }
 
 function openDepartment(name) {
+  if (!readPeriodControls(state.currentView === "overview" ? "global" : "detail")) return;
   if (state.user.role === "department" && name !== state.user.department_name) {
     toast("Tu cuenta solo tiene acceso al departamento asignado.", "error");
     return;
   }
   state.selectedDepartment = name;
   if (state.user.role === "treasurer") $("#detail-department").value = name || "";
+  syncPeriodControls();
   $("#department-title").textContent = name || "Todos los departamentos";
   state.currentView = "department";
   state.transactionPage = 1;
@@ -799,6 +918,9 @@ $("#logout-button").addEventListener("click", async () => {
 
 $$(".nav-item").forEach((button) => button.addEventListener("click", () => {
   const view = button.dataset.view;
+  if (state.currentView === "overview" && !readPeriodControls("global")) return;
+  else if (state.currentView === "department" && !readPeriodControls("detail")) return;
+  syncPeriodControls();
   state.currentView = view;
   updateNav();
   if (view === "overview") loadGlobalReport();
@@ -814,6 +936,47 @@ $$(".nav-item").forEach((button) => button.addEventListener("click", () => {
 
 $("#global-filter-button").addEventListener("click", loadGlobalReport);
 $("#global-department").addEventListener("change", loadGlobalReport);
+$("#global-year").addEventListener("change", () => {
+  state.period.preset = "custom";
+  loadGlobalReport();
+});
+$("#detail-year").addEventListener("change", () => {
+  state.period.preset = "custom";
+  state.transactionPage = 1;
+  loadDepartmentReport();
+});
+$$("[data-period-view][data-period-preset]").forEach((button) => {
+  button.addEventListener("click", () => applyPeriodPreset(button.dataset.periodView, button.dataset.periodPreset));
+});
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".month-selector")) {
+    $$(".month-selector[open]").forEach((selector) => { selector.open = false; });
+  }
+  const monthButton = event.target.closest("[data-month-view][data-month-option]");
+  const monthAction = event.target.closest("[data-month-view][data-month-action]");
+  const prefix = (monthButton || monthAction || {}).dataset && (monthButton || monthAction).dataset.monthView;
+  if (!prefix) return;
+  state.period.preset = "custom";
+  if (monthButton) {
+    const pressed = monthButton.getAttribute("aria-pressed") === "true";
+    monthButton.setAttribute("aria-pressed", pressed ? "false" : "true");
+  } else {
+    const selectAll = monthAction.dataset.monthAction === "all";
+    $$("[data-month-option]", $("#" + prefix + "-month-options")).forEach((option) => option.setAttribute("aria-pressed", selectAll ? "true" : "false"));
+  }
+  if (prefix === "global") loadGlobalReport();
+  else {
+    state.transactionPage = 1;
+    loadDepartmentReport();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") $$(".month-selector[open]").forEach((selector) => { selector.open = false; });
+});
+$("#global-start").addEventListener("change", () => { state.period.preset = "custom"; });
+$("#global-end").addEventListener("change", () => { state.period.preset = "custom"; });
+$("#detail-start").addEventListener("change", () => { state.period.preset = "custom"; });
+$("#detail-end").addEventListener("change", () => { state.period.preset = "custom"; });
 $("#global-search").addEventListener("input", () => {
   if (state.globalReport) renderDepartmentRows(state.globalReport);
   state.globalSearchRequest += 1;
