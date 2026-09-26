@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local-only MVP for the UNACH treasury reporting PWA."""
+"""UNACH treasury reporting application."""
 
 from __future__ import annotations
 
@@ -30,20 +30,29 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-try:
-    from openpyxl import Workbook, load_workbook
-    from openpyxl.styles import Alignment, Font, PatternFill
-    from openpyxl.utils import get_column_letter
-    from reportlab.lib import colors
-    from reportlab.lib.enums import TA_LEFT, TA_RIGHT
-    from reportlab.lib.pagesizes import A4, landscape
-    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-    from reportlab.lib.units import mm
-    from reportlab.platypus import LongTable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-except ImportError as exc:
-    raise SystemExit(
-        "Faltan dependencias. Ejecuta: python3 -m pip install -r requirements.txt"
-    ) from exc
+def _openpyxl():
+    try:
+        from openpyxl import Workbook, load_workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+    except ImportError as exc:
+        raise RuntimeError("Falta openpyxl. Ejecuta: python3 -m pip install -r requirements.txt") from exc
+    return Workbook, load_workbook, Alignment, Font, PatternFill, get_column_letter
+
+
+def _reportlab():
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_LEFT, TA_RIGHT
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import mm
+        from reportlab.platypus import LongTable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    except ImportError as exc:
+        raise RuntimeError("Falta reportlab para exportar PDF.") from exc
+    return (colors, TA_LEFT, TA_RIGHT, A4, landscape, ParagraphStyle,
+            getSampleStyleSheet, mm, LongTable, Paragraph, SimpleDocTemplate,
+            Spacer, Table, TableStyle)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -51,6 +60,10 @@ PUBLIC_DIR = ROOT / "public"
 DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "tesoreria-local.sqlite3"
 SOURCE_PATH = ROOT / "documentos-base" / "reporte-contable-2026-09-22.xlsx"
+if os.environ.get("UNACH_DB_PATH"):
+    DB_PATH = Path(os.environ["UNACH_DB_PATH"])
+if os.environ.get("UNACH_SOURCE_PATH"):
+    SOURCE_PATH = Path(os.environ["UNACH_SOURCE_PATH"])
 HOST = os.environ.get("UNACH_HOST", "127.0.0.1")
 PORT = int(os.environ.get("UNACH_PORT", "8000"))
 SESSION_SECONDS = 12 * 60 * 60
@@ -107,6 +120,12 @@ def normalize_text(value) -> str:
     return "" if value is None else str(value).strip()
 
 
+def normalize_search_text(value) -> str:
+    decomposed = unicodedata.normalize("NFKD", str(value or "")).casefold()
+    without_marks = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9]+", " ", without_marks).strip()
+
+
 def parse_date(value) -> str:
     if isinstance(value, datetime):
         return value.date().isoformat()
@@ -145,19 +164,28 @@ def password_hash(password: str, salt: bytes | None = None) -> str:
 
 
 class PostgresCursor:
-    def __init__(self, cursor, lastrowid=None, prefetched=None):
+    def __init__(self, cursor, lastrowid=None, prefetched=None, owner=None):
         self._cursor = cursor
         self.lastrowid = lastrowid
         self._prefetched = prefetched
+        self._owner = owner
 
     def fetchone(self):
         if self._prefetched is not None:
             row, self._prefetched = self._prefetched, None
             return row
-        return self._cursor.fetchone()
+        started = time.perf_counter()
+        try:
+            return self._cursor.fetchone()
+        finally:
+            if self._owner:
+                self._owner.query_duration_ms += (time.perf_counter() - started) * 1000
 
     def fetchall(self):
+        started = time.perf_counter()
         rows = self._cursor.fetchall()
+        if self._owner:
+            self._owner.query_duration_ms += (time.perf_counter() - started) * 1000
         if self._prefetched is not None:
             rows.insert(0, self._prefetched)
             self._prefetched = None
@@ -175,6 +203,38 @@ class PostgresCursor:
     @property
     def rowcount(self):
         return self._cursor.rowcount
+
+
+class InstrumentedCursor:
+    def __init__(self, cursor, owner):
+        self._cursor = cursor
+        self._owner = owner
+
+    def fetchone(self):
+        started = time.perf_counter()
+        try:
+            return self._cursor.fetchone()
+        finally:
+            self._owner.query_duration_ms += (time.perf_counter() - started) * 1000
+
+    def fetchall(self):
+        started = time.perf_counter()
+        try:
+            return self._cursor.fetchall()
+        finally:
+            self._owner.query_duration_ms += (time.perf_counter() - started) * 1000
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        row = self.fetchone()
+        if row is None:
+            raise StopIteration
+        return row
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
 
 
 class HybridRow(dict):
@@ -204,6 +264,9 @@ class PostgresConnection:
     def __init__(self, connection, psycopg):
         self._connection = connection
         self._psycopg = psycopg
+        self.query_count = 0
+        self.query_duration_ms = 0.0
+        self.connect_duration_ms = 0.0
 
     def execute(self, sql: str, parameters=()):
         sql = sql.strip()
@@ -230,26 +293,34 @@ class PostgresConnection:
         if return_id:
             sql = sql.rstrip().rstrip(";") + " RETURNING id"
         sql = sql.replace("?", "%s")
+        started = time.perf_counter()
         try:
             cursor = self._connection.execute(sql, tuple(parameters))
             if return_id:
                 row = cursor.fetchone()
-                return PostgresCursor(cursor, row["id"] if row else None, row)
-            return PostgresCursor(cursor)
+                return PostgresCursor(cursor, row["id"] if row else None, row, self)
+            return PostgresCursor(cursor, owner=self)
         except self._psycopg.IntegrityError as exc:
             self._connection.rollback()
             raise sqlite3.IntegrityError(str(exc)) from exc
+        finally:
+            self.query_count += 1
+            self.query_duration_ms += (time.perf_counter() - started) * 1000
 
     def executemany(self, sql: str, parameters):
         """Run a parameterized batch efficiently for PostgreSQL imports."""
         sql = sql.strip().replace("?", "%s")
+        started = time.perf_counter()
         try:
             cursor = self._connection.cursor()
             cursor.executemany(sql, parameters)
-            return PostgresCursor(cursor)
+            return PostgresCursor(cursor, owner=self)
         except self._psycopg.IntegrityError as exc:
             self._connection.rollback()
             raise sqlite3.IntegrityError(str(exc)) from exc
+        finally:
+            self.query_count += 1
+            self.query_duration_ms += (time.perf_counter() - started) * 1000
 
     def executescript(self, script: str):
         schema = re.sub(
@@ -272,6 +343,40 @@ class PostgresConnection:
 
     def close(self):
         self._connection.close()
+
+
+class InstrumentedSQLiteConnection(sqlite3.Connection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.query_count = 0
+        self.query_duration_ms = 0.0
+        self.connect_duration_ms = 0.0
+
+    def execute(self, sql, parameters=()):
+        started = time.perf_counter()
+        try:
+            cursor = super().execute(sql, parameters)
+            return InstrumentedCursor(cursor, self)
+        finally:
+            self.query_count += 1
+            self.query_duration_ms += (time.perf_counter() - started) * 1000
+
+    def executemany(self, sql, parameters):
+        started = time.perf_counter()
+        try:
+            cursor = super().executemany(sql, parameters)
+            return InstrumentedCursor(cursor, self)
+        finally:
+            self.query_count += 1
+            self.query_duration_ms += (time.perf_counter() - started) * 1000
+
+    def executescript(self, sql):
+        started = time.perf_counter()
+        try:
+            return super().executescript(sql)
+        finally:
+            self.query_count += 1
+            self.query_duration_ms += (time.perf_counter() - started) * 1000
 
 
 def verify_password(password: str, stored: str) -> bool:
@@ -307,6 +412,7 @@ def connect(db_path: Path | str | None = None):
             import psycopg
         except ImportError as exc:
             raise RuntimeError("Falta psycopg para conectar con PostgreSQL.") from exc
+        started = time.perf_counter()
         connection = psycopg.connect(
             database_url,
             connect_timeout=10,
@@ -314,11 +420,21 @@ def connect(db_path: Path | str | None = None):
             prepare_threshold=None,
             row_factory=postgres_row_factory,
         )
-        return PostgresConnection(connection, psycopg)
-    conn = sqlite3.connect(str(target), timeout=20)
+        wrapped = PostgresConnection(connection, psycopg)
+        wrapped.connect_duration_ms = (time.perf_counter() - started) * 1000
+        return wrapped
+    started = time.perf_counter()
+    conn = sqlite3.connect(str(target), timeout=20, factory=InstrumentedSQLiteConnection)
+    conn.connect_duration_ms = (time.perf_counter() - started) * 1000
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 20000")
+    conn.create_function(
+        "digits_only", 1,
+        lambda value: re.sub(r"\D", "", str(value or "")),
+        deterministic=True,
+    )
+    conn.create_function("normalize_search", 1, normalize_search_text, deterministic=True)
     return conn
 
 
@@ -393,12 +509,23 @@ def create_schema(conn: sqlite3.Connection) -> None:
             file_sha256 TEXT NOT NULL,
             row_count INTEGER NOT NULL,
             created_by INTEGER NOT NULL REFERENCES users(id),
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ready',
+            result_batch_id INTEGER REFERENCES import_batches(id),
+            completed_at TEXT
         );
         CREATE TABLE IF NOT EXISTS import_staging (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             preview_token TEXT NOT NULL REFERENCES import_previews(token) ON DELETE CASCADE,
             record_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_import_staging_token_id
+            ON import_staging(preview_token, id);
+        CREATE INDEX IF NOT EXISTS idx_import_previews_created
+            ON import_previews(created_at);
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT NOT NULL
         );
         """
     )
@@ -419,6 +546,36 @@ def create_schema(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS department_id TEXT")
         else:
             conn.execute("ALTER TABLE transactions ADD COLUMN department_id TEXT")
+    apply_migrations(conn)
+
+
+def apply_migrations(conn) -> None:
+    """Apply small additive schema changes outside request handling."""
+    preview_columns = set()
+    if isinstance(conn, PostgresConnection):
+        preview_columns = {
+            row["column_name"] for row in conn.execute(
+                """SELECT column_name FROM information_schema.columns
+                   WHERE table_schema = current_schema() AND table_name = 'import_previews'"""
+            ).fetchall()
+        }
+    else:
+        preview_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(import_previews)").fetchall()
+        }
+    if "status" not in preview_columns:
+        conn.execute("ALTER TABLE import_previews ADD COLUMN status TEXT NOT NULL DEFAULT 'ready'")
+    if "result_batch_id" not in preview_columns:
+        conn.execute("ALTER TABLE import_previews ADD COLUMN result_batch_id INTEGER")
+    if "completed_at" not in preview_columns:
+        conn.execute("ALTER TABLE import_previews ADD COLUMN completed_at TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_import_staging_token_id ON import_staging(preview_token, id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_import_previews_created ON import_previews(created_at)")
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+        (1, utc_now()),
+    )
+    conn.commit()
 
 
 def record_audit(
@@ -433,7 +590,21 @@ def record_audit(
     )
 
 
+def session_metadata(conn, user: dict | None) -> dict:
+    dates = conn.execute(
+        "SELECT MIN(movement_date) AS start, MAX(movement_date) AS end FROM transactions"
+    ).fetchone()
+    return {
+        "user": user,
+        "dateRange": {"start": dates["start"], "end": dates["end"]},
+        "departments": [
+            row["name"] for row in conn.execute("SELECT name FROM departments ORDER BY name")
+        ],
+    }
+
+
 def import_records_from_xlsx(file_bytes: bytes) -> list[dict]:
+    _, load_workbook, *_ = _openpyxl()
     workbook = load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
     sheet = workbook[workbook.sheetnames[0]]
     rows = sheet.iter_rows(values_only=True)
@@ -770,7 +941,7 @@ def selected_period_intervals(
 
 def intervals_sql(column: str, intervals: list[tuple[str, str]]) -> tuple[str, list[str]]:
     if not intervals:
-        return "0", []
+        return "1 = 0", []
     parts = []
     parameters = []
     for interval_start, interval_end in intervals:
@@ -801,47 +972,45 @@ def get_summary(
     intervals = selected_period_intervals(start, end, year, months)
     period_start = intervals[0][0] if intervals else start
     period_end = intervals[-1][1] if intervals else end
-    movement_period, movement_period_params = intervals_sql("movement_date", intervals)
-    departments = conn.execute(
-        "SELECT name, opening_balance, currency FROM departments ORDER BY name"
-    ).fetchall()
+    movement_period, movement_period_params = intervals_sql("t.movement_date", intervals)
+    query = """SELECT d.name, d.opening_balance, d.currency,
+                    COALESCE(SUM(CASE WHEN t.movement_date < ? THEN t.amount ELSE 0 END), 0) AS prior,
+                    COALESCE(SUM(CASE WHEN """ + movement_period + """ AND t.amount > 0
+                                      THEN t.amount ELSE 0 END), 0) AS inflow,
+                    COALESCE(SUM(CASE WHEN """ + movement_period + """ AND t.amount < 0
+                                      THEN -t.amount ELSE 0 END), 0) AS outflow,
+                    COALESCE(SUM(CASE WHEN """ + movement_period + """ THEN t.amount ELSE 0 END), 0) AS net,
+                    COALESCE(SUM(CASE WHEN """ + movement_period + """ AND t.id IS NOT NULL
+                                      THEN 1 ELSE 0 END), 0) AS rows
+                 FROM departments d
+                 LEFT JOIN transactions t ON t.department_name = d.name
+                    AND (t.movement_date < ? OR """ + movement_period + ")"
+    query_params = [
+        period_start,
+        *movement_period_params, *movement_period_params, *movement_period_params, *movement_period_params,
+        period_start, *movement_period_params,
+    ]
     if department_name is not None:
-        departments = [row for row in departments if row["name"] == department_name]
-        if not departments:
-            raise ValueError("Departamento no encontrado.")
+        query += " WHERE d.name = ?"
+        query_params.append(department_name)
+    query += " GROUP BY d.name, d.opening_balance, d.currency ORDER BY d.name"
+    departments = conn.execute(query, query_params).fetchall()
+    if department_name is not None and not departments:
+        raise ValueError("Departamento no encontrado.")
     opening_by_department = {row["name"]: int(row["opening_balance"]) for row in departments}
-    summaries = []
-    for department in departments:
-        name = department["name"]
-        before = conn.execute(
-            """SELECT COALESCE(SUM(amount), 0) AS amount
-               FROM transactions WHERE department_name = ? AND movement_date < ?""",
-            (name, period_start),
-        ).fetchone()["amount"]
-        current = conn.execute(
-            """SELECT
-                 COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS inflow,
-                 COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) AS outflow,
-                 COALESCE(SUM(amount), 0) AS net,
-                 COUNT(*) AS rows
-               FROM transactions
-               WHERE department_name = ? AND """ + movement_period,
-            [name, *movement_period_params],
-        ).fetchone()
-        opening = int(department["opening_balance"]) + int(before)
-        net = int(current["net"])
-        summaries.append(
-            {
-                "department": name,
-                "currency": department["currency"],
-                "opening": opening,
-                "inflow": int(current["inflow"]),
-                "outflow": int(current["outflow"]),
-                "net": net,
-                "closing": int(department["opening_balance"]),
-                "rows": int(current["rows"]),
-            }
-        )
+    summaries = [
+        {
+            "department": row["name"],
+            "currency": row["currency"],
+            "opening": int(row["opening_balance"]) + int(row["prior"]),
+            "inflow": int(row["inflow"]),
+            "outflow": int(row["outflow"]),
+            "net": int(row["net"]),
+            "closing": int(row["opening_balance"]),
+            "rows": int(row["rows"]),
+        }
+        for row in departments
+    ]
     totals = {
         "opening": sum(item["opening"] for item in summaries),
         "inflow": sum(item["inflow"] for item in summaries),
@@ -850,17 +1019,17 @@ def get_summary(
         "closing": sum(item["closing"] for item in summaries),
         "rows": sum(item["rows"] for item in summaries),
     }
-    monthly_sql = """SELECT substr(movement_date, 1, 7) AS month,
-             COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS inflow,
-             COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) AS outflow,
-             COALESCE(SUM(amount), 0) AS net
-           FROM transactions
+    monthly_sql = """SELECT substr(t.movement_date, 1, 7) AS month,
+             COALESCE(SUM(CASE WHEN t.amount > 0 THEN t.amount ELSE 0 END), 0) AS inflow,
+             COALESCE(SUM(CASE WHEN t.amount < 0 THEN -t.amount ELSE 0 END), 0) AS outflow,
+             COALESCE(SUM(t.amount), 0) AS net
+           FROM transactions t
            WHERE """ + movement_period
     monthly_parameters = list(movement_period_params)
     if department_name is not None:
-        monthly_sql += " AND department_name = ?"
+        monthly_sql += " AND t.department_name = ?"
         monthly_parameters.append(department_name)
-    monthly_sql += " GROUP BY substr(movement_date, 1, 7) ORDER BY month"
+    monthly_sql += " GROUP BY substr(t.movement_date, 1, 7) ORDER BY month"
     monthly_query = conn.execute(monthly_sql, monthly_parameters).fetchall()
     monthly_map = {row["month"]: row for row in monthly_query}
     month_cutoffs = {}
@@ -952,61 +1121,110 @@ def get_transactions(
     year: int | None = None,
     months: list[int] | None = None,
 ) -> list[dict]:
+    page = get_transactions_page(
+        conn, start, end, department_name, search, year, months, page_size=None
+    )
+    return page["transactions"]
+
+
+def get_transactions_page(
+    conn,
+    start: str,
+    end: str,
+    department_name: str | None = None,
+    search: str | None = None,
+    year: int | None = None,
+    months: list[int] | None = None,
+    page: int = 1,
+    page_size: int | None = 25,
+    cursor: tuple[str, int] | None = None,
+) -> dict:
     intervals = selected_period_intervals(start, end, year, months)
     period_end = intervals[-1][1] if intervals else end
+    visible_period, period_params = intervals_sql("movement_date", intervals)
     where = ["movement_date <= ?"]
-    params: list = [period_end]
+    ledger_params: list = [period_end]
     if department_name is not None:
         where.append("department_name = ?")
-        params.append(department_name)
-    rows = conn.execute(
-        """SELECT id, source_row, department_name, movement_type_number, movement_type,
-                  movement_date, event_date, amount, description, donor_name, currency,
-                  observations
-           FROM transactions WHERE """ + " AND ".join(where) + " ORDER BY movement_date, id",
-        params,
-    ).fetchall()
-    opening = conn.execute(
-        "SELECT COALESCE(SUM(opening_balance), 0) FROM departments"
-        + (" WHERE name = ?" if department_name is not None else ""),
-        (department_name,) if department_name is not None else (),
-    ).fetchone()[0]
-    running = int(opening)
-    result = []
-    for row in rows:
-        running += int(row["amount"])
-        movement_date = row["movement_date"]
-        if any(interval_start <= movement_date <= interval_end for interval_start, interval_end in intervals):
-            item = dict(row)
-            item["running_balance"] = running
-            result.append(item)
-    result.reverse()
+        ledger_params.append(department_name)
+    fields = [
+        "id", "source_row", "department_id", "department_name", "movement_type_number",
+        "movement_type", "movement_date", "event_date", "amount", "description",
+        "base_person_id", "server_id", "donor_name", "currency", "total_by_currency", "observations",
+    ]
+    ledger_fields = ", ".join("t." + field for field in fields)
+    ledger = """WITH ledger AS (
+        SELECT """ + ledger_fields + ",\n               d.opening_balance + SUM(t.amount) OVER (PARTITION BY t.department_name ORDER BY t.movement_date, t.id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_balance\n""" + """        FROM transactions t JOIN departments d ON d.name = t.department_name
+        WHERE """ + " AND ".join(where) + "\n    ), selected AS (\n        SELECT * FROM ledger WHERE " + visible_period
+    visible_params: list = list(period_params)
     if search:
-        def normalized(value):
-            decomposed = unicodedata.normalize("NFKD", str(value or "")).casefold()
-            return "".join(char for char in decomposed if not unicodedata.combining(char))
-
-        needle = normalized(search).strip()
+        terms = re.findall(r"[a-z0-9]+", normalize_search_text(search))
+        # Include displayed dates, all identifying columns and both original currency units
+        # and running balance. A digits-only alternative preserves lookup by formatted amount.
+        date_display = "substr(movement_date, 9, 2) || '/' || substr(movement_date, 6, 2) || '/' || substr(movement_date, 1, 4)"
+        event_display = "substr(event_date, 9, 2) || '/' || substr(event_date, 6, 2) || '/' || substr(event_date, 1, 4)"
+        searchable = " || ' ' || ".join(
+            "COALESCE(CAST(" + field + " AS TEXT), '')" for field in fields[1:]
+        ) + " || ' ' || " + date_display + " || ' ' || " + event_display + \
+            " || ' ' || CAST(running_balance AS TEXT) || ' ' || CAST(CAST(amount / 100 AS INTEGER) AS TEXT)" + \
+            " || ' ' || CAST(CAST(running_balance / 100 AS INTEGER) AS TEXT)"
+        normalized_text = (
+            "translate(lower(" + searchable + "), "
+            + "'áàäâãåéèëêíìïîóòöôõúùüûñç', 'aaaaaaeeeeiiiiooooouuuunc')"
+            if isinstance(conn, PostgresConnection)
+            else "normalize_search(" + searchable + ")"
+        )
+        for term in terms:
+            ledger += " AND " + normalized_text + " LIKE ?"
+            visible_params.append("%" + term + "%")
         digits = re.sub(r"\D", "", search)
-        matches = []
-        for item in result:
-            movement = date.fromisoformat(item["movement_date"])
-            event = date.fromisoformat(item["event_date"])
-            text = " ".join(
-                str(item.get(key) or "") for key in (
-                    "department_name", "movement_type_number", "movement_type", "movement_date",
-                    "event_date", "description", "donor_name", "currency", "observations",
-                )
-            ) + " " + movement.strftime("%d/%m/%Y") + " " + event.strftime("%d/%m/%Y")
-            text += " " + format_clp(item["amount"]) + " " + format_clp(item["running_balance"])
-            text += " " + str(int(item["amount"]) // 100) + " " + str(int(item["running_balance"]) // 100)
-            matched = needle in normalized(text)
-            if not matched and len(digits) >= 3:
-                matched = digits in re.sub(r"\D", "", text)
-            if matched:
-                matches.append(item)
-        result = matches
-    return result
+        if len(digits) >= 3:
+            if isinstance(conn, PostgresConnection):
+                only_digits = "regexp_replace(" + searchable + ", '[^0-9]', '', 'g')"
+            else:
+                only_digits = "digits_only(" + searchable + ")"
+            ledger += " AND (" + normalized_text + " LIKE ? OR " + only_digits + " LIKE ?)"
+            visible_params.extend(["%" + digits + "%", "%" + digits + "%"])
+        elif not terms:
+            # Punctuation-only input should never turn into an unbounded full listing.
+            ledger += " AND 1 = 0"
+    ledger += ")"
+    if page_size is not None:
+        ledger += ", matched AS (SELECT *, COUNT(*) OVER() AS _match_count FROM selected)"
+    select_sql = ledger + (" SELECT * FROM matched" if page_size is not None else " SELECT * FROM selected")
+    select_params = [*ledger_params, *visible_params]
+    if cursor is not None:
+        select_sql += " WHERE (movement_date < ? OR (movement_date = ? AND id < ?))"
+        select_params.extend((cursor[0], cursor[0], int(cursor[1])))
+    select_sql += " ORDER BY movement_date DESC, id DESC"
+    has_more = False
+    if page_size is not None:
+        page = max(1, int(page))
+        select_sql += " LIMIT ?"
+        select_params.append(int(page_size) + 1)
+        if cursor is None:
+            select_sql += " OFFSET ?"
+            select_params.append((page - 1) * int(page_size))
+    rows = [dict(row) for row in conn.execute(select_sql, select_params).fetchall()]
+    total = int(rows[0].pop("_match_count")) if rows and page_size is not None else 0
+    if page_size is None:
+        total = len(rows)
+    if page_size is not None and len(rows) > page_size:
+        rows = rows[:page_size]
+        has_more = True
+    next_cursor = None
+    if rows and has_more:
+        last = rows[-1]
+        next_cursor = {"date": last["movement_date"], "id": int(last["id"])}
+    return {
+        "transactions": rows,
+        "total": total,
+        "page": max(1, int(page)),
+        "pageSize": page_size,
+        "pages": max(1, (total + page_size - 1) // page_size) if page_size else 1,
+        "hasMore": has_more,
+        "nextCursor": next_cursor,
+    }
 
 
 def format_clp(value: int) -> str:
@@ -1031,6 +1249,7 @@ def summary_filter_caption(summary: dict) -> str:
 
 
 def export_xlsx(summary: dict, transactions: list[dict] | None) -> bytes:
+    Workbook, _, Alignment, Font, PatternFill, get_column_letter = _openpyxl()
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Resumen"
@@ -1041,6 +1260,8 @@ def export_xlsx(summary: dict, transactions: list[dict] | None) -> bytes:
     filter_caption = summary_filter_caption(summary)
     if filter_caption:
         period_caption += " · " + filter_caption
+    if summary.get("filters", {}).get("searchApplied"):
+        period_caption += " · Detalle: coincidencias de búsqueda"
     sheet.append(["Período", period_caption])
     if summary.get("filters", {}).get("emptySelection"):
         sheet.append(["Selección", "No hay períodos dentro del rango de fechas con la selección de año y meses aplicada."])
@@ -1148,6 +1369,9 @@ def export_xlsx(summary: dict, transactions: list[dict] | None) -> bytes:
 
 
 def export_pdf(summary: dict, transactions: list[dict] | None) -> bytes:
+    (colors, TA_LEFT, TA_RIGHT, A4, landscape, ParagraphStyle,
+     getSampleStyleSheet, mm, LongTable, Paragraph, SimpleDocTemplate,
+     Spacer, Table, TableStyle) = _reportlab()
     output = io.BytesIO()
     page_size = landscape(A4)
     doc = SimpleDocTemplate(
@@ -1202,6 +1426,8 @@ def export_pdf(summary: dict, transactions: list[dict] | None) -> bytes:
     filter_caption = summary_filter_caption(summary)
     if filter_caption:
         period_caption += " | " + filter_caption
+    if summary.get("filters", {}).get("searchApplied"):
+        period_caption += " | detalle: coincidencias de búsqueda"
     story = [
         Paragraph("Tesorería UNACH", styles["ReportTitle"]),
         Paragraph(
@@ -1220,6 +1446,11 @@ def export_pdf(summary: dict, transactions: list[dict] | None) -> bytes:
     elif summary.get("filters", {}).get("nonContiguous"):
         story.append(Paragraph(
             "El movimiento neto suma solo los meses seleccionados; el saldo final incluye todos los movimientos hasta la última fecha incluida.",
+            styles["ReportMeta"],
+        ))
+    if summary.get("filters", {}).get("searchApplied"):
+        story.append(Paragraph(
+            "El resumen cubre el período completo; el detalle incluye solo las coincidencias de búsqueda.",
             styles["ReportMeta"],
         ))
     story.append(Spacer(1, 7 * mm))
@@ -1348,7 +1579,7 @@ def export_pdf(summary: dict, transactions: list[dict] | None) -> bytes:
         canvas.line(12 * mm, 11 * mm, width - 12 * mm, 11 * mm)
         canvas.setFont("Helvetica", 7)
         canvas.setFillColor(colors.HexColor("#64748B"))
-        canvas.drawString(12 * mm, 7 * mm, "Tesorería UNACH | Informe generado localmente")
+        canvas.drawString(12 * mm, 7 * mm, "Tesorería UNACH | Documento interno")
         canvas.drawRightString(width - 12 * mm, 7 * mm, "Página {}".format(document.page))
         canvas.restoreState()
 
@@ -1362,9 +1593,28 @@ class TreasuryHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stdout.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
 
+    def _observability_headers(self):
+        request_id = getattr(self, "_request_id", None)
+        if request_id:
+            self.send_header("X-Request-ID", request_id)
+        started = getattr(self, "_request_started", None)
+        conn = getattr(self, "_active_connection", None)
+        if started is not None:
+            connect_ms = float(getattr(conn, "connect_duration_ms", 0.0))
+            query_ms = float(getattr(conn, "query_duration_ms", 0.0))
+            query_count = int(getattr(conn, "query_count", 0))
+            total_ms = (time.perf_counter() - started) * 1000
+            self.send_header(
+                "Server-Timing",
+                "connect;dur={:.1f}, db;dur={:.1f};desc=\"{} SQL\", app;dur={:.1f}".format(
+                    connect_ms, query_ms, query_count, total_ms
+                ),
+            )
+
     def send_json(self, status: int, payload: dict, cookie: str | None = None):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
+        self._observability_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -1383,6 +1633,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
     def send_bytes(self, status: int, body: bytes, content_type: str, filename: str):
         safe = re.sub(r"[^A-Za-z0-9._-]+", "-", filename)
         self.send_response(status)
+        self._observability_headers()
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -1446,11 +1697,14 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         return user
 
     def do_GET(self):
+        self._request_started = time.perf_counter()
+        self._request_id = uuid.uuid4().hex
         parsed = urllib.parse.urlparse(self.path)
         if not parsed.path.startswith("/api/"):
             self.serve_static(parsed.path)
             return
         conn = connect()
+        self._active_connection = conn
         try:
             query = urllib.parse.parse_qs(parsed.query)
             if parsed.path == "/api/departments":
@@ -1461,19 +1715,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 if not user:
                     self.send_json(200, {"user": None})
                     return
-                dates = conn.execute(
-                    "SELECT MIN(movement_date) AS start, MAX(movement_date) AS end FROM transactions"
-                ).fetchone()
-                self.send_json(
-                    200,
-                    {
-                        "user": user,
-                        "dateRange": {"start": dates["start"], "end": dates["end"]},
-                        "departments": [
-                            r["name"] for r in conn.execute("SELECT name FROM departments ORDER BY name")
-                        ],
-                    },
-                )
+                self.send_json(200, session_metadata(conn, user))
             elif parsed.path == "/api/summary":
                 user = self.require_user(conn)
                 if not user:
@@ -1511,25 +1753,34 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                     (query.get("year") or [None])[0],
                     (query.get("months") or [None])[0],
                 )
-                rows = get_transactions(conn, start, end, scope, search or None, year, months)
                 page = max(1, int((query.get("page") or ["1"])[0]))
                 page_size = 25
+                cursor = None
+                if (query.get("cursor_date") or [""])[0] or (query.get("cursor_id") or [""])[0]:
+                    cursor_date = (query.get("cursor_date") or [""])[0]
+                    cursor_id_raw = (query.get("cursor_id") or [""])[0]
+                    try:
+                        date.fromisoformat(cursor_date)
+                        cursor_id = int(cursor_id_raw)
+                        if cursor_id <= 0:
+                            raise ValueError
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError("El cursor de movimientos no es válido.") from exc
+                    cursor = (cursor_date, cursor_id)
                 if not search:
                     record_audit(conn, user["id"], "transactions_viewed", {
                         "scope": scope or "all_departments", "start": start, "end": end,
                         "year": year, "months": months or [],
                     })
                     conn.commit()
-                total = len(rows)
-                first = (page - 1) * page_size
+                page_data = get_transactions_page(
+                    conn, start, end, scope, search or None, year, months,
+                    page=page, page_size=page_size, cursor=cursor,
+                )
                 self.send_json(
                     200,
                     {
-                        "transactions": rows[first : first + page_size],
-                        "page": page,
-                        "pageSize": page_size,
-                        "total": total,
-                        "pages": max(1, (total + page_size - 1) // page_size),
+                        **page_data,
                         "scope": scope or "all_departments",
                     },
                 )
@@ -1571,22 +1822,57 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 if department:
                     where.append("(u.department_name = ? OR a.detail LIKE ?)")
                     params.extend((department, "%" + department + "%"))
-                sql = """SELECT a.id, a.event_type, a.detail, a.created_at, u.email
-                         FROM audit_log a LEFT JOIN users u ON u.id = a.user_id"""
-                if where:
-                    sql += " WHERE " + " AND ".join(where)
-                sql += " ORDER BY a.id DESC" + (" LIMIT 150" if not (start or end or department or search) else " LIMIT 3000")
-                rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
                 if search:
-                    def normalized(value):
-                        decomposed = unicodedata.normalize("NFKD", str(value or "")).casefold()
-                        return "".join(char for char in decomposed if not unicodedata.combining(char))
-                    needle = normalized(search).strip()
+                    searchable = "a.created_at || ' ' || a.event_type || ' ' || a.detail || ' ' || COALESCE(u.email, '')"
+                    normalized = (
+                        "translate(lower(" + searchable + "), "
+                        + "'áàäâãåéèëêíìïîóòöôõúùüûñç', 'aaaaaaeeeeiiiiooooouuuunc')"
+                        if isinstance(conn, PostgresConnection)
+                        else "normalize_search(" + searchable + ")"
+                    )
+                    terms = re.findall(r"[a-z0-9]+", normalize_search_text(search))
+                    for term in terms:
+                        where.append(normalized + " LIKE ?")
+                        params.append("%" + term + "%")
                     digit_search = re.sub(r"\D", "", search)
-                    rows = [row for row in rows if needle in normalized(
-                        row["created_at"] + " " + row["event_type"] + " " + row["detail"] + " " + (row["email"] or "")
-                    ) or (len(digit_search) >= 3 and digit_search in re.sub(r"\D", "", row["created_at"] + row["detail"]))]
-                self.send_json(200, {"events": rows[:150]})
+                    if len(digit_search) >= 3:
+                        digits = (
+                            "regexp_replace(" + searchable + ", '[^0-9]', '', 'g')"
+                            if isinstance(conn, PostgresConnection)
+                            else "digits_only(" + searchable + ")"
+                        )
+                        where.append("(" + normalized + " LIKE ? OR " + digits + " LIKE ?)")
+                        params.extend(("%" + digit_search + "%", "%" + digit_search + "%"))
+                    elif not terms:
+                        where.append("1 = 0")
+                base_sql = """ FROM audit_log a LEFT JOIN users u ON u.id = a.user_id"""
+                if where:
+                    base_sql += " WHERE " + " AND ".join(where)
+                total = int(conn.execute("SELECT COUNT(*)" + base_sql, params).fetchone()[0])
+                cursor_raw = ((query.get("cursor_id") or [""])[0] or "").strip()
+                cursor_id = None
+                if cursor_raw:
+                    try:
+                        cursor_id = int(cursor_raw)
+                        if cursor_id < 1:
+                            raise ValueError
+                    except ValueError as exc:
+                        raise ValueError("El cursor de actividad no es válido.") from exc
+                select_sql = "SELECT a.id, a.event_type, a.detail, a.created_at, u.email" + base_sql
+                select_params = list(params)
+                if cursor_id is not None:
+                    select_sql += (" AND " if where else " WHERE ") + "a.id < ?"
+                    select_params.append(cursor_id)
+                select_sql += " ORDER BY a.id DESC LIMIT 51"
+                rows = [dict(row) for row in conn.execute(select_sql, select_params).fetchall()]
+                has_more = len(rows) > 50
+                if has_more:
+                    rows = rows[:50]
+                next_cursor = rows[-1]["id"] if has_more and rows else None
+                self.send_json(
+                    200,
+                    {"events": rows, "total": total, "hasMore": has_more, "nextCursor": next_cursor},
+                )
             elif parsed.path == "/api/export":
                 self.handle_export(conn, query)
             else:
@@ -1595,11 +1881,13 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": str(exc)})
         except Exception:
             traceback.print_exc()
-            self.send_json(500, {"error": "Ocurrió un error local al procesar la solicitud."})
+            self.send_json(500, {"error": "Ocurrió un error al procesar la solicitud."})
         finally:
             conn.close()
 
     def do_POST(self):
+        self._request_started = time.perf_counter()
+        self._request_id = uuid.uuid4().hex
         parsed = urllib.parse.urlparse(self.path)
         if not parsed.path.startswith("/api/"):
             self.send_json(404, {"error": "Ruta no encontrada."})
@@ -1608,6 +1896,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             self.send_json(403, {"error": "Origen de solicitud no permitido."})
             return
         conn = connect()
+        self._active_connection = conn
         try:
             if parsed.path == "/api/login":
                 self.handle_login(conn)
@@ -1627,7 +1916,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": str(exc)})
         except Exception:
             traceback.print_exc()
-            self.send_json(500, {"error": "Ocurrió un error local al procesar la solicitud."})
+            self.send_json(500, {"error": "Ocurrió un error al procesar la solicitud."})
         finally:
             conn.close()
 
@@ -1667,15 +1956,13 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         )
         self.send_json(
             200,
-            {
-                "user": {
-                    "id": row["id"],
-                    "email": row["email"],
-                    "role": row["role"],
-                    "department_name": row["department_name"],
-                    "status": row["status"],
-                }
-            },
+            session_metadata(conn, {
+                "id": row["id"],
+                "email": row["email"],
+                "role": row["role"],
+                "department_name": row["department_name"],
+                "status": row["status"],
+            }),
             cookie=cookie,
         )
 
@@ -1776,9 +2063,10 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 filename = Path(part.get_filename()).name
                 content = part.get_payload(decode=True) or b""
                 if not filename.lower().endswith(".xlsx"):
-                    raise ValueError("La carga local acepta archivos .xlsx.")
+                    raise ValueError("La carga acepta archivos .xlsx.")
                 if len(content) > MAX_UPLOAD_BYTES:
-                    raise ValueError("El archivo supera 25 MB.")
+                    limit_mb = max(1, MAX_UPLOAD_BYTES // (1024 * 1024))
+                    raise ValueError("El archivo supera el límite de {} MB.".format(limit_mb))
                 return filename, content
         raise ValueError("Selecciona un archivo .xlsx.")
 
@@ -1786,15 +2074,14 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         actor = self.require_treasurer(conn)
         if not actor:
             return
+        expired_before = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        conn.execute("DELETE FROM import_previews WHERE created_at < ?", (expired_before,))
         filename, content = self.parse_uploaded_xlsx()
         records = import_records_from_xlsx(content)
         known_departments = {
             row["name"] for row in conn.execute("SELECT name FROM departments").fetchall()
         }
         unknown = sorted({r["department_name"] for r in records} - known_departments)
-        has_existing_transactions = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0] > 0
-        if unknown and has_existing_transactions:
-            raise ValueError("Departamentos no registrados: " + ", ".join(unknown[:8]))
         file_hash = hashlib.sha256(content).hexdigest()
         previous = conn.execute(
             "SELECT COUNT(*) FROM import_batches WHERE file_sha256 = ?", (file_hash,)
@@ -1824,6 +2111,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 "same_file_warning": bool(previous),
                 "period": analysis["period"],
                 "overlap_count": analysis["overlap_count"],
+                "new_departments": unknown,
                 "exact_matches": analysis["exact_matches"],
                 "similar_matches": analysis["similar_matches"],
                 "file_repeats": analysis["file_repeats"],
@@ -1838,22 +2126,46 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 "rows": len(records),
                 "same_file_warning": bool(previous),
                 "message": "No se eliminarán filas automáticamente; revisa los avisos antes de incorporar.",
+                "new_departments": unknown,
                 **analysis,
             },
         )
 
     def handle_import_commit(self, conn: sqlite3.Connection):
+        if not isinstance(conn, PostgresConnection):
+            # SQLite's reserved write lock serializes retries before they inspect staging.
+            conn.execute("BEGIN IMMEDIATE")
         actor = self.require_treasurer(conn)
         if not actor:
             return
         payload = self.parse_json_body()
         token = normalize_text(payload.get("preview_token"))
+        lock_clause = " FOR UPDATE" if isinstance(conn, PostgresConnection) else ""
         preview = conn.execute(
-            "SELECT * FROM import_previews WHERE token = ? AND created_by = ?",
+            "SELECT * FROM import_previews WHERE token = ? AND created_by = ?" + lock_clause,
             (token, actor["id"]),
         ).fetchone()
         if not preview:
             raise ValueError("La vista previa expiró o no existe.")
+        expired_before = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        if preview["created_at"] < expired_before:
+            conn.execute("DELETE FROM import_previews WHERE token = ?", (token,))
+            conn.commit()
+            raise ValueError("La vista previa expiró. Vuelve a validar el archivo.")
+        if preview["status"] == "completed":
+            conn.commit()
+            self.send_json(
+                200,
+                {
+                    "message": "Esta importación ya fue incorporada.",
+                    "rows": int(preview["row_count"]),
+                    "batch_id": preview["result_batch_id"],
+                    "already_completed": True,
+                },
+            )
+            return
+        if preview["status"] != "ready":
+            raise ValueError("La vista previa ya está en proceso. Revisa el resultado antes de reintentar.")
         existing = conn.execute(
             "SELECT 1 FROM import_batches WHERE file_sha256 = ? LIMIT 1",
             (preview["file_sha256"],),
@@ -1866,9 +2178,15 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             raise ValueError("La vista previa está incompleta; vuelve a cargar el archivo.")
         records = [json.loads(row["record_json"]) for row in staged]
         analysis = analyze_import(conn, records)
+        known_departments = {
+            row["name"] for row in conn.execute("SELECT name FROM departments").fetchall()
+        }
+        new_departments = sorted({record["department_name"] for record in records} - known_departments)
+        analysis["new_departments"] = new_departments
         required = {
             "same_file": bool(existing),
             "overlap": analysis["overlap_count"] > 0,
+            "new_departments": bool(new_departments),
             "matches": bool(
                 analysis["exact_matches"]
                 or analysis["similar_matches"]
@@ -1878,6 +2196,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         confirmed = {
             "same_file": bool(payload.get("confirm_same_file")),
             "overlap": bool(payload.get("confirm_overlap")),
+            "new_departments": bool(payload.get("confirm_new_departments")),
             "matches": bool(payload.get("confirm_matches")),
         }
         if any(required[key] and not confirmed[key] for key in required):
@@ -1942,7 +2261,14 @@ class TreasuryHandler(BaseHTTPRequestHandler):
            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
         for start in range(0, len(transaction_rows), 1000):
             conn.executemany(transaction_sql, transaction_rows[start : start + 1000])
-        conn.execute("DELETE FROM import_previews WHERE token = ?", (token,))
+        conn.execute("DELETE FROM import_staging WHERE preview_token = ?", (token,))
+        consumed = conn.execute(
+            """UPDATE import_previews SET status = 'completed', result_batch_id = ?, completed_at = ?
+               WHERE token = ? AND created_by = ? AND status = 'ready'""",
+            (batch_id, utc_now(), token, actor["id"]),
+        )
+        if consumed.rowcount != 1:
+            raise ValueError("La vista previa ya fue procesada. Consulta su resultado antes de reintentar.")
         record_audit(
             conn,
             actor["id"],
@@ -1964,6 +2290,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             {
                 "message": "Importación completada.",
                 "rows": preview["row_count"],
+                "batch_id": batch_id,
                 "warnings": analysis,
             },
         )
@@ -1994,7 +2321,12 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         include_detail = view == "department" or (
             user["role"] == "treasurer" and view == "all_detail"
         )
-        rows = get_transactions(conn, start, end, scope, None, year, months) if include_detail else None
+        search = ((query.get("q") or [""])[0] or "").strip()[:120]
+        if search and not include_detail:
+            raise ValueError("La búsqueda solo se puede aplicar al detalle de movimientos.")
+        if search:
+            summary["filters"]["searchApplied"] = True
+        rows = get_transactions(conn, start, end, scope, search or None, year, months) if include_detail else None
         event = "export_pdf" if format_name == "pdf" else "export_xlsx"
         record_audit(
             conn,
@@ -2003,6 +2335,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             {
                 "scope": scope or "global", "view": view, "start": start, "end": end,
                 "year": year, "months": months or [],
+                "detail_filtered": bool(search),
             },
         )
         conn.commit()
@@ -2049,6 +2382,14 @@ class TreasuryHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    if sys.argv[1:] == ["--migrate"]:
+        conn = connect()
+        try:
+            create_schema(conn)
+            print("Esquema de Tesorería UNACH actualizado.")
+        finally:
+            conn.close()
+        return
     initialize_database()
     server = ThreadingHTTPServer((HOST, PORT), TreasuryHandler)
     print("Tesorería UNACH disponible en http://{}:{}".format(HOST, PORT))

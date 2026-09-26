@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import os
-import threading
+import re
 import traceback
 import urllib.parse
 
-from app import TreasuryHandler, initialize_database
-
-_database_ready = False
-_database_lock = threading.Lock()
+from app import TreasuryHandler
 
 
 def _restore_original_path(request_handler: TreasuryHandler) -> None:
@@ -26,7 +23,6 @@ def _restore_original_path(request_handler: TreasuryHandler) -> None:
 
 
 def _prepare_request(request_handler: TreasuryHandler) -> bool:
-    global _database_ready
     if not os.environ.get("DATABASE_URL", "").strip():
         request_handler.send_json(
             503,
@@ -34,11 +30,6 @@ def _prepare_request(request_handler: TreasuryHandler) -> bool:
         )
         return False
     try:
-        if not _database_ready:
-            with _database_lock:
-                if not _database_ready:
-                    initialize_database()
-                    _database_ready = True
         _restore_original_path(request_handler)
         return True
     except Exception:
@@ -52,6 +43,14 @@ def _prepare_request(request_handler: TreasuryHandler) -> bool:
 
 class handler(TreasuryHandler):
     def do_GET(self):
+        _restore_original_path(self)
+        path = urllib.parse.urlsplit(self.path).path
+        session_cookie = re.search(
+            r"(?:^|;\s*)unach_session=[^;\s]+", self.headers.get("Cookie", "")
+        )
+        if path == "/api/me" and not session_cookie:
+            self.send_json(200, {"user": None})
+            return
         if _prepare_request(self):
             super().do_GET()
 

@@ -9,16 +9,29 @@ const state = {
   transactionPage: 1,
   transactionPages: 1,
   transactionTotal: 0,
+  transactionLoaded: 0,
+  transactionCursor: null,
   transactionLoading: false,
   transactionRequest: 0,
+  transactionController: null,
   globalReportRequest: 0,
+  globalReportController: null,
   detailSearchTimer: null,
   globalSearchTimer: null,
   globalSearchRequest: 0,
   globalSearchPage: 1,
   globalSearchPages: 1,
+  globalSearchLoaded: 0,
+  globalSearchCursor: null,
+  globalSearchController: null,
   globalSearchLoading: false,
+  globalFilterTimer: null,
+  detailFilterTimer: null,
   auditSearchTimer: null,
+  auditRequest: 0,
+  auditController: null,
+  auditCursor: null,
+  auditLoaded: 0,
   users: [],
   detailFilterDirty: false,
   currentView: "overview",
@@ -162,6 +175,31 @@ function initializePeriodControls(range) {
   syncPeriodControls();
 }
 
+function refreshPeriodRange(range) {
+  const previous = state.dateRange || {};
+  const wasAll = (!state.period.start || state.period.start === previous.start) &&
+    (!state.period.end || state.period.end === previous.end);
+  state.dateRange = range || null;
+  const firstYear = range && range.start ? Number(range.start.slice(0, 4)) : (new Date()).getFullYear();
+  const lastYear = range && range.end ? Number(range.end.slice(0, 4)) : firstYear;
+  const options = ['<option value="">Todos</option>'];
+  for (let year = lastYear; year >= firstYear; year -= 1) {
+    options.push('<option value="' + year + '">' + year + '</option>');
+  }
+  ["global", "detail"].forEach((prefix) => {
+    const select = $("#" + prefix + "-year");
+    const selected = state.period.year;
+    select.innerHTML = options.join("");
+    if (Array.from(select.options).some((option) => option.value === selected)) select.value = selected;
+  });
+  if (wasAll) {
+    state.period.start = range && range.start || "";
+    state.period.end = range && range.end || "";
+    state.period.preset = "all";
+  }
+  syncPeriodControls();
+}
+
 function readPeriodControls(prefix) {
   const start = $("#" + prefix + "-start").value;
   const end = $("#" + prefix + "-end").value;
@@ -212,7 +250,7 @@ function applyPeriodPreset(prefix, preset) {
   else loadDepartmentReport();
 }
 
-function showApp(user, metadata) {
+async function showApp(user, metadata) {
   state.user = user;
   state.departments = metadata.departments || [];
   state.dateRange = metadata.dateRange;
@@ -233,10 +271,16 @@ function showApp(user, metadata) {
   $("#department-title").textContent = user.role === "treasurer" ? "Detalle de movimientos" : user.department_name;
   state.currentView = "overview";
   updateNav();
-  loadGlobalReport();
+  return loadGlobalReport();
 }
 
 function showAuth() {
+  if (state.globalReportController) state.globalReportController.abort();
+  if (state.globalSearchController) state.globalSearchController.abort();
+  if (state.transactionController) state.transactionController.abort();
+  state.globalReportRequest += 1;
+  state.globalSearchRequest += 1;
+  state.transactionRequest += 1;
   state.user = null;
   $("#app-shell").hidden = true;
   $("#auth-screen").hidden = false;
@@ -401,13 +445,27 @@ function renderDepartmentRows(report) {
 
 async function loadGlobalReport() {
   const period = periodQuery("global");
-  if (!period) return;
+  if (period === null) return false;
+  if (state.globalReportController) state.globalReportController.abort();
+  if ($("#global-search").value.trim()) {
+    if (state.globalSearchController) state.globalSearchController.abort();
+    state.globalSearchRequest += 1;
+    state.globalSearchCursor = null;
+    state.globalSearchLoaded = 0;
+    $("#global-search-more").disabled = true;
+    $("#global-search-more").hidden = true;
+    $("#global-search-list").innerHTML = '<div class="loading">Actualizando búsqueda…</div>';
+  }
+  const controller = new AbortController();
+  state.globalReportController = controller;
   const requestId = ++state.globalReportRequest;
   const department = state.user.role === "treasurer" ? $("#global-department").value : "";
-  const query = period + (department ? "&department=" + encodeURIComponent(department) : "");
+  const params = new URLSearchParams(period);
+  if (department) params.set("department", department);
+  const query = params.toString();
   $("#global-metrics").innerHTML = '<div class="loading">Actualizando balance…</div>';
   try {
-    const report = await api("/api/summary?" + query);
+    const report = await api("/api/summary?" + query, { signal: controller.signal });
     if (requestId !== state.globalReportRequest) return;
     state.globalReport = report;
     renderMetrics($("#global-metrics"), report);
@@ -415,10 +473,12 @@ async function loadGlobalReport() {
     renderChart($("#global-chart"), report.monthly);
     renderDepartmentRows(report);
     if ($("#global-search").value.trim()) loadGlobalSearch();
+    return true;
   } catch (error) {
     if (requestId !== state.globalReportRequest) return;
-    toast(error.message, "error");
+    if (error.name !== "AbortError") toast("No se pudo cargar el balance. Puedes reintentar desde el filtro.", "error");
     if (error.status === 401) showAuth();
+    return false;
   }
 }
 
@@ -429,12 +489,20 @@ async function loadGlobalSearch(append = false) {
     return;
   }
   const period = periodQuery("global");
-  if (!period) return;
-  const page = append ? state.globalSearchPage + 1 : 1;
+  if (period === null) return;
+  if (state.globalSearchController) state.globalSearchController.abort();
+  const controller = new AbortController();
+  state.globalSearchController = controller;
   const requestId = ++state.globalSearchRequest;
   const department = state.user.role === "treasurer" ? $("#global-department").value : "";
-  const query = period + "&page=" + page + "&q=" + encodeURIComponent(search) +
-    (department ? "&department=" + encodeURIComponent(department) : "");
+  const params = new URLSearchParams(period);
+  params.set("q", search);
+  params.set("page", append ? state.globalSearchPage + 1 : 1);
+  if (append && state.globalSearchCursor) {
+    params.set("cursor_date", state.globalSearchCursor.date);
+    params.set("cursor_id", state.globalSearchCursor.id);
+  }
+  if (department) params.set("department", department);
   const panel = $("#global-search-panel");
   panel.hidden = false;
   state.globalSearchLoading = true;
@@ -442,14 +510,16 @@ async function loadGlobalSearch(append = false) {
   if (append) $("#global-search-more").textContent = "Cargando…";
   else $("#global-search-list").innerHTML = '<div class="loading">Buscando movimientos…</div>';
   try {
-    const pageData = await api("/api/transactions?" + query);
+    const pageData = await api("/api/transactions?" + params.toString(), { signal: controller.signal });
     if (requestId !== state.globalSearchRequest) return;
     state.globalSearchPage = pageData.page;
     state.globalSearchPages = pageData.pages;
-    const loaded = Math.min(pageData.page * pageData.pageSize, pageData.total);
+    state.globalSearchCursor = pageData.nextCursor;
+    state.globalSearchLoaded = (append ? state.globalSearchLoaded : 0) + pageData.transactions.length;
+    const loaded = state.globalSearchLoaded;
     $("#global-search-count").textContent = pageData.total.toLocaleString("es-CL") + " movimientos";
     $("#global-search-page-label").textContent = loaded.toLocaleString("es-CL") + " de " + pageData.total.toLocaleString("es-CL");
-    $("#global-search-more").hidden = loaded >= pageData.total;
+    $("#global-search-more").hidden = !pageData.hasMore;
     const list = $("#global-search-list");
     if (!pageData.transactions.length) {
       list.innerHTML = '<div class="transaction-empty">Sin coincidencias para este período.</div>';
@@ -459,11 +529,11 @@ async function loadGlobalSearch(append = false) {
       else list.innerHTML = markup;
     }
   } catch (error) {
-    if (requestId === state.globalSearchRequest) toast(error.message, "error");
+    if (requestId === state.globalSearchRequest && error.name !== "AbortError") toast(error.message, "error");
   } finally {
     if (requestId === state.globalSearchRequest) {
       state.globalSearchLoading = false;
-      $("#global-search-more").disabled = state.globalSearchPage >= state.globalSearchPages;
+      $("#global-search-more").disabled = !state.globalSearchCursor;
       $("#global-search-more").textContent = "Mostrar más";
     }
   }
@@ -481,6 +551,8 @@ function openDepartment(name) {
   $("#department-title").textContent = name || "Todos los departamentos";
   state.currentView = "department";
   state.transactionPage = 1;
+  state.transactionLoaded = 0;
+  state.transactionCursor = null;
   updateNav();
   loadDepartmentReport();
 }
@@ -491,7 +563,7 @@ function getDetailScope() {
 
 function detailQuery() {
   const period = periodQuery("detail");
-  if (!period) return null;
+  if (period === null) return null;
   const department = getDetailScope();
   return period + "&view=department" + (department ? "&department=" + encodeURIComponent(department) : "");
 }
@@ -499,7 +571,11 @@ function detailQuery() {
 async function loadDepartmentReport(append = false, refreshSummary = true) {
   if (append && state.detailFilterDirty) return;
   const query = detailQuery();
-  if (!query) return;
+  if (query === null) return;
+  const shouldRefreshSummary = refreshSummary || state.detailFilterDirty || !state.detailReport;
+  if (state.transactionController) state.transactionController.abort();
+  const controller = new AbortController();
+  state.transactionController = controller;
   if (!append) state.detailFilterDirty = false;
   const requestedPage = append ? state.transactionPage + 1 : 1;
   const requestId = ++state.transactionRequest;
@@ -514,9 +590,16 @@ async function loadDepartmentReport(append = false, refreshSummary = true) {
     $("#page-label").textContent = "";
   }
   try {
-    const summaryPromise = append || (!refreshSummary && state.detailReport) ? Promise.resolve(state.detailReport) : api("/api/summary?" + query);
-    const transactionQuery = query + "&page=" + requestedPage + (search ? "&q=" + encodeURIComponent(search) : "");
-    const transactionPromise = api("/api/transactions?" + transactionQuery);
+    const summaryPromise = append || (!shouldRefreshSummary && state.detailReport)
+      ? Promise.resolve(state.detailReport) : api("/api/summary?" + query, { signal: controller.signal });
+    const transactionParams = new URLSearchParams(query);
+    if (search) transactionParams.set("q", search);
+    if (append && state.transactionCursor) {
+      transactionParams.set("cursor_date", state.transactionCursor.date);
+      transactionParams.set("cursor_id", state.transactionCursor.id);
+    }
+    transactionParams.set("page", requestedPage);
+    const transactionPromise = api("/api/transactions?" + transactionParams.toString(), { signal: controller.signal });
     const results = await Promise.all([summaryPromise, transactionPromise]);
     if (requestId !== state.transactionRequest) return;
     const report = results[0];
@@ -525,16 +608,18 @@ async function loadDepartmentReport(append = false, refreshSummary = true) {
     state.transactionPage = pageData.page;
     state.transactionPages = pageData.pages;
     state.transactionTotal = pageData.total;
+    state.transactionCursor = pageData.nextCursor;
+    state.transactionLoaded = (append ? state.transactionLoaded : 0) + pageData.transactions.length;
     renderMetrics($("#detail-metrics"), report);
     renderTransactions(pageData, append);
   } catch (error) {
     if (requestId !== state.transactionRequest) return;
-    toast(error.message, "error");
+    if (error.name !== "AbortError") toast(error.message, "error");
     if (error.status === 401) showAuth();
   } finally {
     if (requestId === state.transactionRequest) {
       state.transactionLoading = false;
-      button.disabled = state.detailFilterDirty || state.transactionPage >= state.transactionPages;
+      button.disabled = state.detailFilterDirty || !state.transactionCursor;
       button.textContent = "Mostrar más";
     }
   }
@@ -543,10 +628,10 @@ async function loadDepartmentReport(append = false, refreshSummary = true) {
 function renderTransactions(pageData, append = false) {
   const search = $("#detail-search").value.trim();
   $("#transaction-count").textContent = pageData.total.toLocaleString("es-CL") + (search ? " coincidencias" : " movimientos");
-  const loaded = Math.min(pageData.page * pageData.pageSize, pageData.total);
+  const loaded = state.transactionLoaded;
   $("#page-label").textContent = loaded.toLocaleString("es-CL") + " de " + pageData.total.toLocaleString("es-CL") + " movimientos";
-  $("#load-more-button").hidden = loaded >= pageData.total;
-  $("#load-more-button").disabled = state.detailFilterDirty || loaded >= pageData.total;
+  $("#load-more-button").hidden = !pageData.hasMore;
+  $("#load-more-button").disabled = state.detailFilterDirty || !pageData.hasMore;
   const container = $("#transaction-list");
   if (!pageData.transactions.length) {
     if (!append) container.innerHTML = '<div class="transaction-empty">' + (search ? "Sin coincidencias para la búsqueda." : "No hay movimientos para este período.") + '</div>';
@@ -640,14 +725,25 @@ function auditLabel(event) {
   return labels[event] || event;
 }
 
-async function loadAudit() {
+async function loadAudit(append = false) {
+  if (state.auditController) state.auditController.abort();
+  const controller = new AbortController();
+  state.auditController = controller;
+  const requestId = ++state.auditRequest;
   const params = new URLSearchParams();
   if ($("#audit-start").value) params.set("start", $("#audit-start").value);
   if ($("#audit-end").value) params.set("end", $("#audit-end").value);
   if ($("#audit-department").value) params.set("department", $("#audit-department").value);
   if ($("#audit-search").value.trim()) params.set("q", $("#audit-search").value.trim());
-  const data = await api("/api/admin/audit?" + params.toString());
-  $("#audit-list").innerHTML = data.events.map((row) => {
+  if (append && state.auditCursor) params.set("cursor_id", state.auditCursor);
+  if (!append) $("#audit-list").innerHTML = '<div class="loading">Cargando actividad…</div>';
+  $("#audit-more").disabled = true;
+  try {
+    const data = await api("/api/admin/audit?" + params.toString(), { signal: controller.signal });
+    if (requestId !== state.auditRequest) return;
+    state.auditCursor = data.nextCursor;
+    state.auditLoaded = (append ? state.auditLoaded : 0) + data.events.length;
+    const markup = data.events.map((row) => {
     let detail = {};
     try { detail = JSON.parse(row.detail || "{}"); } catch (_) {}
     const context = Object.entries(detail).map(([key, value]) => key + ": " + value).join(" · ");
@@ -656,7 +752,18 @@ async function loadAudit() {
       '<span class="audit-event">' + escapeHTML(auditLabel(row.event_type)) + '</span>' +
       '<span>' + escapeHTML(row.email || "Sistema") + (context ? " · " + escapeHTML(context) : "") + '</span>' +
       '</div>';
-  }).join("") || '<div class="transaction-empty">No hay actividad registrada.</div>';
+    }).join("");
+    const list = $("#audit-list");
+    if (append) list.insertAdjacentHTML("beforeend", markup);
+    else list.innerHTML = markup || '<div class="transaction-empty">No hay actividad registrada.</div>';
+    $("#audit-count").textContent = state.auditLoaded.toLocaleString("es-CL") +
+      " de " + data.total.toLocaleString("es-CL") + " eventos";
+    $("#audit-more").hidden = !data.hasMore;
+  } catch (error) {
+    if (error.name !== "AbortError") throw error;
+  } finally {
+    if (requestId === state.auditRequest) $("#audit-more").disabled = !state.auditCursor;
+  }
 }
 
 async function openAdminTab(tab) {
@@ -674,7 +781,7 @@ async function openAdminTab(tab) {
 function exportReport(format, view) {
   const prefix = view === "department" ? "detail" : "global";
   const period = periodQuery(prefix);
-  if (!period) return;
+  if (period === null) return;
   const params = new URLSearchParams(period);
   params.set("format", format);
   params.set("view", view);
@@ -684,6 +791,12 @@ function exportReport(format, view) {
   if (view === "all_detail" && state.user.role !== "treasurer") {
     toast("La exportación detallada global requiere acceso de tesorería.", "error");
     return;
+  }
+  if (view === "department" && $("#detail-search").value.trim()) {
+    const onlyMatches = window.confirm(
+      "La búsqueda está activa. Aceptar exporta solo las coincidencias; Cancelar exporta todos los movimientos del período."
+    );
+    if (onlyMatches) params.set("q", $("#detail-search").value.trim());
   }
   window.location.href = "/api/export?" + params.toString();
 }
@@ -715,6 +828,7 @@ function renderImportPreview(preview) {
   const similarCount = Number(preview.similar_matches || 0);
   const repeatCount = Number(preview.file_repeats || 0);
   const matchCount = exactCount + similarCount + repeatCount;
+  const newDepartments = preview.new_departments || [];
   const overlapItems = (preview.overlapping_batches || []).map((batch) =>
     '<li><strong>' + escapeHTML(batch.filename) + '</strong> · ' +
     shortDate(batch.start) + '–' + shortDate(batch.end) +
@@ -747,6 +861,14 @@ function renderImportPreview(preview) {
   if (preview.same_file_warning) {
     html += '<div class="import-warning"><strong>Archivo ya incorporado</strong><br>' +
       'El contenido completo coincide con una carga anterior. Si corresponde, podrás confirmar su incorporación.</div>';
+  }
+
+  if (newDepartments.length) {
+    html += '<div class="import-warning"><strong>Departamentos nuevos</strong><br>' +
+      'Confirma que estos nombres corresponden a departamentos que deben agregarse:<ul class="import-overlap-list">' +
+      newDepartments.map((name) => '<li>' + escapeHTML(name) + '</li>').join("") +
+      '</ul></div><label class="import-confirm"><input id="confirm-import-new-departments" type="checkbox">' +
+      '<span>Revisé y autorizo agregar estos departamentos.</span></label>';
   }
 
   if (overlapCount) {
@@ -792,9 +914,10 @@ function renderImportPreview(preview) {
   const updateButton = () => {
     const overlapConfirmed = !overlapCount || $("#confirm-import-overlap").checked;
     const matchesConfirmed = !matchCount || $("#confirm-import-matches").checked;
-    $("#commit-import").disabled = !overlapConfirmed || !matchesConfirmed;
+    const departmentsConfirmed = !newDepartments.length || $("#confirm-import-new-departments").checked;
+    $("#commit-import").disabled = !overlapConfirmed || !matchesConfirmed || !departmentsConfirmed;
   };
-  [$("#confirm-import-overlap"), $("#confirm-import-matches")].filter(Boolean)
+  [$("#confirm-import-overlap"), $("#confirm-import-matches"), $("#confirm-import-new-departments")].filter(Boolean)
     .forEach((checkbox) => checkbox.addEventListener("change", updateButton));
   updateButton();
   $("#commit-import").addEventListener("click", commitImport);
@@ -820,19 +943,26 @@ async function commitImport() {
         preview_token: state.importPreview.preview_token,
         confirm_same_file: confirmSame,
         confirm_overlap: !state.importPreview.overlap_count || $("#confirm-import-overlap").checked,
+        confirm_new_departments: !(state.importPreview.new_departments || []).length ||
+          $("#confirm-import-new-departments").checked,
         confirm_matches: !(state.importPreview.exact_matches || state.importPreview.similar_matches || state.importPreview.file_repeats) ||
           $("#confirm-import-matches").checked,
       }),
     });
-    toast(result.message + " Se incorporaron " + result.rows.toLocaleString("es-CL") + " filas.", "success");
     state.importPreview = null;
     $("#import-preview").hidden = true;
     $("#import-form").reset();
     const metadata = await api("/api/me");
     state.departments = metadata.departments || [];
-    state.dateRange = metadata.dateRange;
     populateDepartmentOptions(state.departments);
-    loadGlobalReport();
+    refreshPeriodRange(metadata.dateRange);
+    state.transactionLoaded = 0;
+    state.transactionCursor = null;
+    const reportLoaded = await loadGlobalReport();
+    toast(reportLoaded
+      ? result.message + " Se incorporaron " + result.rows.toLocaleString("es-CL") + " filas."
+      : "Archivo incorporado. El balance no se pudo actualizar; recarga la vista.",
+    reportLoaded ? "success" : "error");
   } catch (error) {
     if (error.status === 409 && error.payload && error.payload.analysis) {
       state.importPreview = Object.assign({}, state.importPreview, error.payload.analysis, {
@@ -852,9 +982,6 @@ async function commitImport() {
 
 async function boot() {
   try {
-    const departments = await api("/api/departments");
-    state.departments = departments.departments || [];
-    populateDepartmentOptions(state.departments);
     const session = await api("/api/me");
     if (session.user) showApp(session.user, session);
   } catch (error) {
@@ -873,9 +1000,8 @@ $("#login-form").addEventListener("submit", async (event) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email: form.get("email"), password: form.get("password") }),
     });
-    const metadata = await api("/api/me");
-    showApp(result.user, metadata);
-    toast("Sesión iniciada.", "success");
+    const loaded = await showApp(result.user, result);
+    if (loaded) toast("Sesión iniciada.", "success");
   } catch (error) {
     toast(error.message, "error");
   } finally {
@@ -908,7 +1034,18 @@ $("#register-form").addEventListener("submit", async (event) => {
   }
 });
 
-$$("[data-show-register]").forEach((button) => button.addEventListener("click", () => setAuthMode("register")));
+$$("[data-show-register]").forEach((button) => button.addEventListener("click", async () => {
+  try {
+    if (!state.departments.length) {
+      const data = await api("/api/departments");
+      state.departments = data.departments || [];
+      populateDepartmentOptions(state.departments);
+    }
+    setAuthMode("register");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}));
 $$("[data-show-login]").forEach((button) => button.addEventListener("click", () => setAuthMode("login")));
 
 $("#logout-button").addEventListener("click", async () => {
@@ -929,6 +1066,8 @@ $$(".nav-item").forEach((button) => button.addEventListener("click", () => {
     if (state.user.role === "treasurer") state.selectedDepartment = $("#detail-department").value || null;
     $("#department-title").textContent = state.selectedDepartment || "Todos los departamentos";
     state.transactionPage = 1;
+    state.transactionLoaded = 0;
+    state.transactionCursor = null;
     loadDepartmentReport();
   }
   if (view === "admin") openAdminTab(state.adminTab);
@@ -938,11 +1077,15 @@ $("#global-filter-button").addEventListener("click", loadGlobalReport);
 $("#global-department").addEventListener("change", loadGlobalReport);
 $("#global-year").addEventListener("change", () => {
   state.period.preset = "custom";
+  state.globalSearchCursor = null;
+  state.globalSearchLoaded = 0;
   loadGlobalReport();
 });
 $("#detail-year").addEventListener("change", () => {
   state.period.preset = "custom";
   state.transactionPage = 1;
+  state.transactionLoaded = 0;
+  state.transactionCursor = null;
   loadDepartmentReport();
 });
 $$("[data-period-view][data-period-preset]").forEach((button) => {
@@ -964,10 +1107,16 @@ document.addEventListener("click", (event) => {
     const selectAll = monthAction.dataset.monthAction === "all";
     $$("[data-month-option]", $("#" + prefix + "-month-options")).forEach((option) => option.setAttribute("aria-pressed", selectAll ? "true" : "false"));
   }
-  if (prefix === "global") loadGlobalReport();
+  if (prefix === "global") {
+    window.clearTimeout(state.globalFilterTimer);
+    state.globalFilterTimer = window.setTimeout(() => loadGlobalReport(), 180);
+  }
   else {
     state.transactionPage = 1;
-    loadDepartmentReport();
+    state.transactionLoaded = 0;
+    state.transactionCursor = null;
+    window.clearTimeout(state.detailFilterTimer);
+    state.detailFilterTimer = window.setTimeout(() => loadDepartmentReport(), 180);
   }
 });
 document.addEventListener("keydown", (event) => {
@@ -980,7 +1129,10 @@ $("#detail-end").addEventListener("change", () => { state.period.preset = "custo
 $("#global-search").addEventListener("input", () => {
   if (state.globalReport) renderDepartmentRows(state.globalReport);
   state.globalSearchRequest += 1;
+  if (state.globalSearchController) state.globalSearchController.abort();
   state.globalSearchPage = 1;
+  state.globalSearchLoaded = 0;
+  state.globalSearchCursor = null;
   window.clearTimeout(state.globalSearchTimer);
   if (!$("#global-search").value.trim()) {
     $("#global-search-panel").hidden = true;
@@ -994,37 +1146,48 @@ $("#global-search").addEventListener("input", () => {
 });
 $("#detail-filter-button").addEventListener("click", () => {
   state.transactionPage = 1;
+  state.transactionLoaded = 0;
+  state.transactionCursor = null;
   state.detailFilterDirty = false;
   loadDepartmentReport();
 });
 $("#detail-start").addEventListener("change", () => {
   state.detailFilterDirty = true;
+  state.transactionLoaded = 0;
+  state.transactionCursor = null;
   $("#load-more-button").disabled = true;
 });
 $("#detail-end").addEventListener("change", () => {
   state.detailFilterDirty = true;
+  state.transactionLoaded = 0;
+  state.transactionCursor = null;
   $("#load-more-button").disabled = true;
 });
 $("#detail-department").addEventListener("change", () => {
   state.selectedDepartment = $("#detail-department").value || null;
   $("#department-title").textContent = state.selectedDepartment || "Todos los departamentos";
   state.transactionPage = 1;
+  state.transactionLoaded = 0;
+  state.transactionCursor = null;
   loadDepartmentReport();
 });
 $("#detail-search").addEventListener("input", () => {
   state.transactionRequest += 1;
+  if (state.transactionController) state.transactionController.abort();
   window.clearTimeout(state.detailSearchTimer);
   state.transactionPage = 1;
+  state.transactionLoaded = 0;
+  state.transactionCursor = null;
   $("#load-more-button").disabled = true;
   state.detailSearchTimer = window.setTimeout(() => loadDepartmentReport(false, false), 220);
 });
 $("#load-more-button").addEventListener("click", () => {
-  if (!state.transactionLoading && !state.detailFilterDirty && state.transactionPage < state.transactionPages) {
+  if (!state.transactionLoading && !state.detailFilterDirty && state.transactionCursor) {
     loadDepartmentReport(true);
   }
 });
 $("#global-search-more").addEventListener("click", () => {
-  if (!state.globalSearchLoading && state.globalSearchPage < state.globalSearchPages) loadGlobalSearch(true);
+  if (!state.globalSearchLoading && state.globalSearchCursor) loadGlobalSearch(true);
 });
 
 $$(".export-button").forEach((button) => button.addEventListener("click", () => {
@@ -1039,6 +1202,9 @@ $("#audit-department").addEventListener("change", () => loadAudit().catch((error
 $("#audit-search").addEventListener("input", () => {
   window.clearTimeout(state.auditSearchTimer);
   state.auditSearchTimer = window.setTimeout(() => loadAudit().catch((error) => toast(error.message, "error")), 220);
+});
+$("#audit-more").addEventListener("click", () => {
+  if (state.auditCursor) loadAudit(true).catch((error) => toast(error.message, "error"));
 });
 $("#import-form").addEventListener("submit", submitImport);
 

@@ -9,6 +9,5 @@ data/
 tmp/
 documentos-base/
 .private-docs/
-tests/
 .DS_Store
 *.log

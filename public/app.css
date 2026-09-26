@@ -294,6 +294,8 @@ a { color: inherit; text-decoration: none; }
 .audit-filters .button { min-height: 34px; font-size: 10px; }
 .audit-row:last-child { border-bottom: 0; }
 .audit-event { color: #3f5773; font-weight: 700; }
+.audit-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 12px; }
+.audit-pagination .button { min-height: 36px; }
 .toast-region { position: fixed; top: 15px; right: 15px; z-index: 20; display: grid; gap: 7px; width: min(360px, calc(100vw - 30px)); }
 .toast { padding: 12px 14px; border: 1px solid #dce7f3; border-radius: 8px; color: #304b69; background: #fff; box-shadow: 0 9px 28px rgba(20, 46, 78, .14); font-size: 11px; line-height: 1.45; animation: enter .18s ease-out; }
 .toast-error { border-color: #f0caca; color: #93434a; }
@@ -368,18 +370,19 @@ a { color: inherit; text-decoration: none; }
   .filter-bar { gap: 10px; min-height: 0; margin-bottom: 12px; padding: 12px; }
   .filter-head { align-items: flex-start; flex-direction: column; gap: 8px; }
   .period-shortcuts { width: 100%; justify-content: flex-start; overflow-x: auto; padding: 1px 1px 4px; }
-  .period-shortcuts button { flex: 0 0 auto; min-height: 34px; font-size: 11px; }
+  .period-shortcuts button { flex: 0 0 auto; min-height: 44px; font-size: 12px; }
   .filter-fields { display: grid; width: 100%; grid-template-columns: 1fr 1fr; gap: 8px; }
   .filter-fields label { min-width: 0; color: #68798d; font-size: 11px; }
-  .filter-fields input, .filter-fields select { width: 100%; height: 40px; min-height: 40px; padding: 0 10px; font-size: 12px; }
+  .filter-fields input, .filter-fields select { width: 100%; height: 44px; min-height: 44px; padding: 0 10px; font-size: 16px; }
   .filter-fields .search-control { grid-column: 1 / -1; min-width: 0; }
   .filter-fields #global-department-filter, .filter-fields #detail-department-filter { grid-column: 1 / -1; }
   .month-selector { min-width: 0; }
-  .month-selector > summary { min-height: 40px; padding: 0 9px; font-size: 12px; }
+  .month-selector > summary { min-height: 44px; padding: 0 9px; font-size: 16px; }
   .month-selector-panel { left: auto; right: 0; }
   .month-selector-options { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .date-separator { display: none; }
-  .filter-fields .button { grid-column: 1 / -1; height: 40px; min-height: 40px; font-size: 11px; }
+  .filter-fields .button { grid-column: 1 / -1; height: 44px; min-height: 44px; font-size: 12px; }
+  .month-selector-options button { min-height: 44px; font-size: 12px; }
   .filter-title { font-size: 12px; }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
   .metric-card { min-height: 92px; padding: 12px 11px 10px; }
@@ -440,9 +443,10 @@ a { color: inherit; text-decoration: none; }
   .audit-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .audit-filters label { min-width: 0; width: 100%; color: #68798d; font-size: 11px; }
   .audit-filters > label:nth-child(3) { grid-column: 1 / -1; }
-  .audit-filters input, .audit-filters select { min-height: 40px; padding: 0 10px; font-size: 12px; }
-  .audit-filters .button { min-height: 40px; font-size: 11px; }
+  .audit-filters input, .audit-filters select { min-height: 44px; padding: 0 10px; font-size: 16px; }
+  .audit-filters .button { min-height: 44px; font-size: 12px; }
   .audit-filters label.search-control, .audit-filters .button { grid-column: 1 / -1; }
+  .audit-pagination .button { min-height: 44px; }
   .admin-list-head { display: none; }
   .admin-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 10px; }
   .admin-primary { font-size: 12px; line-height: 1.35; }
@@ -450,7 +454,7 @@ a { color: inherit; text-decoration: none; }
   .status-pill { padding: 6px 9px; font-size: 10px; }
   .admin-actions .button { min-height: 38px; padding: 0 10px; font-size: 10px; }
   .admin-search { font-size: 11px; }
-  .admin-search input { min-height: 40px; font-size: 12px; }
+  .admin-search input { min-height: 44px; font-size: 16px; }
   .admin-row > :nth-child(2) { grid-column: 1; grid-row: 2; text-align: left; }
   .admin-row > :nth-child(3) { grid-column: 2; grid-row: 1; justify-self: end; }
   .admin-row > :nth-child(4) { grid-column: 2; grid-row: 2; justify-content: flex-end; }

@@ -1,6 +1,10 @@
 #!/bin/sh
 set -e
 
+# This launcher is strictly for local SQLite testing. Do not let an exported
+# production DATABASE_URL redirect local actions (including imports) to Neon.
+unset DATABASE_URL
+
 PYTHON_BIN=python3
 if [ -n "$UNACH_PYTHON" ]; then
   PYTHON_BIN="$UNACH_PYTHON"
