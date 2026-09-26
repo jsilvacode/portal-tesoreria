@@ -3,6 +3,7 @@ import tempfile
 import threading
 import urllib.parse
 import unittest
+from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
@@ -66,6 +67,32 @@ class AnonymousAdapterHandler(vercel_api.handler):
 
 
 class TreasuryTests(unittest.TestCase):
+    def test_postgres_numeric_balances_are_json_serializable_on_every_page(self):
+        original_execute = self.conn.execute
+
+        def postgres_numeric_rows(sql, parameters=()):
+            cursor = original_execute(sql, parameters)
+            class NumericCursor:
+                def fetchall(self):
+                    rows = [dict(row) for row in cursor.fetchall()]
+                    for row in rows:
+                        row["running_balance"] = Decimal(row["running_balance"])
+                    return rows
+            return NumericCursor()
+
+        with patch.object(self.conn, "execute", side_effect=postgres_numeric_rows):
+            first = app.get_transactions_page(self.conn, "2026-01-01", "2026-09-30", page_size=25)
+            token = first["nextCursor"]
+            second = app.get_transactions_page(
+                self.conn, "2026-01-01", "2026-09-30", page_size=25,
+                cursor=(token["date"], token["id"]),
+            )
+        for page in (first, second):
+            json.dumps(page)
+            for row in page["transactions"]:
+                self.assertIsInstance(row["running_balance"], int)
+                self.assertNotIn("_match_count", row)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="unach-synthetic-")
         self.db_path = Path(self.temporary.name) / "fixture.sqlite3"

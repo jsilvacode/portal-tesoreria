@@ -1206,7 +1206,12 @@ def get_transactions_page(
             select_sql += " OFFSET ?"
             select_params.append((page - 1) * int(page_size))
     rows = [dict(row) for row in conn.execute(select_sql, select_params).fetchall()]
-    total = int(rows[0].pop("_match_count")) if rows and page_size is not None else 0
+    total = int(rows[0]["_match_count"]) if rows and page_size is not None else 0
+    for row in rows:
+        # PostgreSQL SUM(bigint) returns numeric (Decimal in psycopg).
+        # Ledger amounts are integer cents; retain that exact JSON contract.
+        row["running_balance"] = int(row["running_balance"])
+        row.pop("_match_count", None)
     if page_size is None:
         total = len(rows)
     if page_size is not None and len(rows) > page_size:
