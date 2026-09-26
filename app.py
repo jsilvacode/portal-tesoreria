@@ -20,7 +20,7 @@ import traceback
 import unicodedata
 import urllib.parse
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from email import policy
 from email.parser import BytesParser
@@ -28,6 +28,7 @@ from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 try:
     from openpyxl import Workbook, load_workbook
@@ -56,6 +57,7 @@ SESSION_SECONDS = 12 * 60 * 60
 MAX_UPLOAD_BYTES = 4 * 1024 * 1024 if os.environ.get("VERCEL") else 25 * 1024 * 1024
 MAX_IMPORT_ROWS = 50_000
 PBKDF2_ITERATIONS = 310_000
+LOCAL_TIMEZONE = ZoneInfo("America/Santiago")
 EXPECTED_HEADERS = (
     "DEPARTMENT_ID",
     "Nombre del Departamento",
@@ -1387,16 +1389,22 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 search = ((query.get("q") or [""])[0] or "").strip()[:120]
                 where, params = [], []
                 if start:
-                    date.fromisoformat(start)
-                    where.append("substr(a.created_at, 1, 10) >= ?")
-                    params.append(start)
+                    start_date = date.fromisoformat(start)
+                    start_utc = datetime.combine(
+                        start_date, datetime.min.time(), LOCAL_TIMEZONE
+                    ).astimezone(timezone.utc).isoformat()
+                    where.append("a.created_at >= ?")
+                    params.append(start_utc)
                 if end:
-                    date.fromisoformat(end)
-                    where.append("substr(a.created_at, 1, 10) <= ?")
-                    params.append(end)
+                    end_date = date.fromisoformat(end) + timedelta(days=1)
+                    end_utc = datetime.combine(
+                        end_date, datetime.min.time(), LOCAL_TIMEZONE
+                    ).astimezone(timezone.utc).isoformat()
+                    where.append("a.created_at < ?")
+                    params.append(end_utc)
                 if department:
-                    where.append("a.detail LIKE ?")
-                    params.append("%" + department + "%")
+                    where.append("(u.department_name = ? OR a.detail LIKE ?)")
+                    params.extend((department, "%" + department + "%"))
                 sql = """SELECT a.id, a.event_type, a.detail, a.created_at, u.email
                          FROM audit_log a LEFT JOIN users u ON u.id = a.user_id"""
                 if where:
@@ -1561,7 +1569,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         if status not in ("active", "inactive"):
             raise ValueError("El nuevo estado debe ser activo o desactivado.")
         target = conn.execute(
-            "SELECT id, email, role, status FROM users WHERE id = ?", (user_id,)
+            "SELECT id, email, role, status, department_name FROM users WHERE id = ?", (user_id,)
         ).fetchone()
         if not target:
             raise ValueError("No se encontró el usuario.")
@@ -1575,7 +1583,16 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         if status == "inactive":
             conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
         event = "user_approved" if status == "active" else "user_deactivated"
-        record_audit(conn, actor["id"], event, {"user_id": user_id, "email": target["email"]})
+        record_audit(
+            conn,
+            actor["id"],
+            event,
+            {
+                "user_id": user_id,
+                "email": target["email"],
+                "department": target["department_name"],
+            },
+        )
         conn.commit()
         self.send_json(200, {"message": "Estado actualizado."})
 
