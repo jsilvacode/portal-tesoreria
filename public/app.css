@@ -537,3 +537,32 @@ button, .button, .admin-actions .button, .pagination .button,
   .admin-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: visible; }
   .admin-tab { min-width: 0; padding: 10px 6px; white-space: normal; }
 }
+
+/* Keep wide desktop filters compact while leaving the mobile layout unchanged. */
+@media (min-width: 701px) and (max-width: 1450px) {
+  .filter-fields, .filter-fields.has-department-filter { grid-template-columns: repeat(3, minmax(0, 1fr)); max-width: 1120px; margin-inline: auto; }
+  .filter-fields .button { grid-column: 1 / -1; justify-self: center; min-width: 180px; }
+}
+@media (min-width: 1451px) {
+  .filter-fields { grid-template-columns: minmax(82px, .55fr) minmax(150px, 1fr) minmax(150px, 1fr) 14px minmax(150px, 1fr) minmax(220px, 1.25fr); max-width: 1450px; margin-inline: auto; gap: 10px; }
+  .filter-fields.has-department-filter { grid-template-columns: minmax(150px, 1.1fr) minmax(82px, .55fr) minmax(150px, 1fr) minmax(150px, 1fr) 14px minmax(150px, 1fr) minmax(220px, 1.25fr); max-width: 1450px; margin-inline: auto; gap: 10px; }
+  .filter-fields .button { grid-column: 1 / -1; justify-self: center; min-width: 180px; }
+  .date-separator { display: block; }
+}
+
+/* Amounts and review actions must stay inside each movement row. */
+.transaction-row > * { min-width: 0; }
+.transaction-amount { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.transaction-amount small { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.maintenance-link { max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: right; }
+.maintenance-heading { align-items: center; }
+@media (min-width: 701px) {
+  .transaction-row { grid-template-columns: 86px 78px minmax(150px, 1.1fr) minmax(180px, 1.7fr) minmax(150px, .95fr); }
+}
+
+/* On mobile, preserve the blue login treatment without the decorative photo. */
+@media (max-width: 680px) {
+  .auth-main::before {
+    background: linear-gradient(180deg, #123b70 0%, #245e9f 48%, rgba(247, 249, 252, .99) 100%);
+  }
+}

@@ -273,7 +273,10 @@
             <div class="import-policy"><strong>Revisión de carga:</strong> no se eliminan filas automáticamente. Se mostrarán los períodos superpuestos y las coincidencias para que el tesorero decida antes de incorporar.</div>
           </section>
           <section id="admin-maintenance-panel" class="admin-panel panel" hidden>
-            <h2>Mantenimiento · Superusuario</h2>
+            <div class="panel-heading maintenance-heading">
+              <div><h2 id="maintenance-panel-title">Mantenimiento · Superusuario</h2></div>
+              <button id="maintenance-back-detail" class="button button-outline" type="button" hidden>Volver a Detalle</button>
+            </div>
             <div class="audit-filters">
               <label>Tipo<select id="maintenance-kind"><option value="movement">Movimiento contable</option><option value="user">Usuario</option><option value="activity">Evento de bitácora</option></select></label>
               <label>ID del registro<input id="maintenance-id" type="number" min="1" step="1"></label>
@@ -281,9 +284,12 @@
             </div>
             <div id="maintenance-result" hidden>
               <pre id="maintenance-record"></pre>
-              <p>La eliminación es permanente. Al eliminar un usuario se cierran sus sesiones y se conservan sus movimientos contables.</p>
-              <label class="admin-search">Tu contraseña<input id="maintenance-password" type="password" autocomplete="current-password"></label>
-              <button id="maintenance-delete" class="button button-outline" type="button">Eliminar este registro</button>
+              <p id="maintenance-readonly-note" class="muted" hidden>Vista de consulta para tesorería. Los registros no se pueden eliminar desde esta cuenta.</p>
+              <div id="maintenance-delete-controls">
+                <p>La eliminación es permanente. Al eliminar un usuario se cierran sus sesiones y se conservan sus movimientos contables.</p>
+                <label class="admin-search">Tu contraseña<input id="maintenance-password" type="password" autocomplete="current-password"></label>
+                <button id="maintenance-delete" class="button button-outline" type="button">Eliminar este registro</button>
+              </div>
             </div>
           </section>
           <section id="admin-audit-panel" class="admin-panel panel" hidden>

@@ -2075,8 +2075,8 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         actor = self.require_user(conn)
         if not actor:
             return
-        if not actor.get("is_superuser") or actor["id"] != superuser_id():
-            self.send_json(403, {"error": "Esta acción requiere superusuario."})
+        if actor["role"] != "treasurer":
+            self.send_json(403, {"error": "Esta acción requiere acceso autorizado."})
             return
         payload = self.parse_json_body()
         kind = payload.get("kind")
@@ -2101,6 +2101,9 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         fingerprint = hashlib.sha256(json.dumps(visible, sort_keys=True, default=str).encode()).hexdigest()
         if payload.get("action") == "preview":
             self.send_json(200, {"record": visible, "fingerprint": fingerprint})
+            return
+        if not actor.get("is_superuser") or actor["id"] != superuser_id():
+            self.send_json(403, {"error": "Solo el superusuario puede eliminar registros."})
             return
         if payload.get("action") != "delete" or payload.get("fingerprint") != fingerprint:
             raise ValueError("Revisa el registro actualizado antes de eliminarlo.")

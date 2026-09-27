@@ -36,6 +36,7 @@ const state = {
   detailFilterDirty: false,
   currentView: "overview",
   adminTab: "users",
+  maintenanceReturn: null,
   importPreview: null,
 };
 
@@ -252,7 +253,9 @@ function applyPeriodPreset(prefix, preset) {
 
 async function showApp(user, metadata) {
   state.user = user;
-  $("#superuser-tab").hidden = !user.is_superuser;
+  $("#superuser-tab").hidden = user.role !== "treasurer";
+  $("#superuser-tab").textContent = user.is_superuser ? "Mantenimiento" : "Revisar registros";
+  state.maintenanceReturn = null;
   state.departments = metadata.departments || [];
   state.dateRange = metadata.dateRange;
   state.selectedDepartment = user.role === "department" ? user.department_name : null;
@@ -777,6 +780,13 @@ async function openAdminTab(tab) {
   state.adminTab = tab;
   $$(".admin-tab").forEach((button) => button.classList.toggle("is-active", button.dataset.adminTab === tab));
   $$(".admin-panel").forEach((panel) => { panel.hidden = panel.id !== "admin-" + tab + "-panel"; });
+  if (tab === "maintenance") {
+    const canDelete = Boolean(state.user?.is_superuser);
+    $("#maintenance-panel-title").textContent = canDelete ? "Mantenimiento · Superusuario" : "Revisar registros";
+    $("#maintenance-delete-controls").hidden = !canDelete;
+    $("#maintenance-readonly-note").hidden = canDelete;
+    $("#maintenance-back-detail").hidden = !state.maintenanceReturn || state.maintenanceReturn.view !== "department";
+  }
   try {
     if (tab === "users") await loadAdminUsers();
     if (tab === "audit") {
@@ -1250,11 +1260,12 @@ $("#audit-export").addEventListener("click", async () => {
   finally { button.disabled = false; }
 });
 function maintenanceButton(kind, id) {
-  return state.user?.is_superuser ? '<button class="text-button maintenance-link" type="button" data-maintenance-kind="' + kind + '" data-maintenance-id="' + Number(id) + '">Revisar #' + Number(id) + '</button>' : "";
+  return state.user?.role === "treasurer" ? '<button class="text-button maintenance-link" type="button" data-maintenance-kind="' + kind + '" data-maintenance-id="' + Number(id) + '">Revisar #' + Number(id) + '</button>' : "";
 }
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-maintenance-id]");
-  if (!button || !state.user?.is_superuser) return;
+  if (!button || state.user?.role !== "treasurer") return;
+  state.maintenanceReturn = {view: state.currentView === "department" ? "department" : null, department: state.selectedDepartment};
   state.currentView = "admin"; updateNav();
   await openAdminTab("maintenance");
   resetMaintenance();
@@ -1269,6 +1280,26 @@ function resetMaintenance() {
   $("#maintenance-password").value = "";
 }
 for (const id of ["maintenance-kind", "maintenance-id"]) $("#" + id).addEventListener("input", resetMaintenance);
+$("#maintenance-back-detail").addEventListener("click", () => {
+  const previous = state.maintenanceReturn;
+  state.maintenanceReturn = null;
+  resetMaintenance();
+  if (!previous || previous.view !== "department") {
+    state.currentView = "admin";
+    updateNav();
+    openAdminTab("maintenance");
+    return;
+  }
+  state.selectedDepartment = previous.department || null;
+  if (state.user?.role === "treasurer") $("#detail-department").value = state.selectedDepartment || "";
+  $("#department-title").textContent = state.selectedDepartment || "Todos los departamentos";
+  state.currentView = "department";
+  state.transactionPage = 1;
+  state.transactionLoaded = 0;
+  state.transactionCursor = null;
+  updateNav();
+  loadDepartmentReport();
+});
 $("#maintenance-preview").addEventListener("click", async () => {
   resetMaintenance();
   const selection = {kind: $("#maintenance-kind").value, id: Number($("#maintenance-id").value)};
