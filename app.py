@@ -2090,6 +2090,9 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         tables = {"movement": "transactions", "user": "users", "activity": "audit_log"}
         if kind not in tables:
             raise ValueError("Selecciona el tipo de registro.")
+        if not actor.get("is_superuser") and kind != "movement":
+            self.send_json(403, {"error": "Tesorería solo puede revisar movimientos contables desde esta vista."})
+            return
         record_id = int(payload.get("id") or 0)
         if record_id <= 0:
             raise ValueError("Indica un ID válido.")

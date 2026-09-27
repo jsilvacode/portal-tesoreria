@@ -786,6 +786,8 @@ async function openAdminTab(tab) {
     $("#maintenance-delete-controls").hidden = !canDelete;
     $("#maintenance-readonly-note").hidden = canDelete;
     $("#maintenance-back-detail").hidden = !state.maintenanceReturn || state.maintenanceReturn.view !== "department";
+    $$("#maintenance-kind option").forEach((option) => { option.hidden = !canDelete && option.value !== "movement"; });
+    if (!canDelete) $("#maintenance-kind").value = "movement";
   }
   try {
     if (tab === "users") await loadAdminUsers();
@@ -1260,7 +1262,9 @@ $("#audit-export").addEventListener("click", async () => {
   finally { button.disabled = false; }
 });
 function maintenanceButton(kind, id) {
-  return state.user?.role === "treasurer" ? '<button class="text-button maintenance-link" type="button" data-maintenance-kind="' + kind + '" data-maintenance-id="' + Number(id) + '">Revisar #' + Number(id) + '</button>' : "";
+  if (state.user?.role !== "treasurer") return "";
+  if (!state.user.is_superuser && kind !== "movement") return "";
+  return '<button class="text-button maintenance-link" type="button" data-maintenance-kind="' + kind + '" data-maintenance-id="' + Number(id) + '">Revisar #' + Number(id) + '</button>';
 }
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-maintenance-id]");
