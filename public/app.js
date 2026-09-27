@@ -535,7 +535,7 @@ async function loadGlobalSearch(append = false) {
     if (!pageData.transactions.length) {
       list.innerHTML = '<div class="transaction-empty">Sin coincidencias para este período.</div>';
     } else {
-      const markup = pageData.transactions.map((row) => transactionRowHTML(row, false)).join("");
+      const markup = pageData.transactions.map((row) => transactionRowHTML(row, true)).join("");
       if (append) list.insertAdjacentHTML("beforeend", markup);
       else list.innerHTML = markup;
     }
