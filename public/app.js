@@ -39,6 +39,7 @@ const state = {
   currentView: "overview",
   adminTab: "users",
   importPreview: null,
+  filterExpanded: { global: false, detail: false },
 };
 
 const $ = (selector, root) => (root || document).querySelector(selector);
@@ -139,6 +140,18 @@ function renderMonthOptions(prefix) {
   ).join("");
 }
 
+function setFilterExpanded(prefix, expanded) {
+  const fields = $("#" + prefix + "-filter-fields");
+  const toggle = $("[data-filter-toggle='" + prefix + "']");
+  if (!fields || !toggle) return;
+  state.filterExpanded[prefix] = Boolean(expanded);
+  fields.hidden = !state.filterExpanded[prefix];
+  toggle.setAttribute("aria-expanded", state.filterExpanded[prefix] ? "true" : "false");
+  toggle.classList.toggle("is-open", state.filterExpanded[prefix]);
+  const chevron = $(".filter-chevron", toggle);
+  if (chevron) chevron.textContent = state.filterExpanded[prefix] ? "⌃" : "⌄";
+}
+
 function syncPeriodControls() {
   ["global", "detail"].forEach((prefix) => {
     $("#" + prefix + "-start").value = state.period.start || "";
@@ -174,6 +187,8 @@ function initializePeriodControls(range) {
     renderMonthOptions(prefix);
   });
   state.period = { start, end, year: "", months: [], preset: "all" };
+  setFilterExpanded("global", false);
+  setFilterExpanded("detail", false);
   syncPeriodControls();
 }
 
@@ -234,7 +249,7 @@ function applyPeriodPreset(prefix, preset) {
   let year = "";
   let months = [];
   const anchor = new Date(availableEnd + "T12:00:00");
-  if (preset === "30" || preset === "90") {
+  if (["30", "60", "90"].includes(preset)) {
     anchor.setDate(anchor.getDate() - (Number(preset) - 1));
     start = isoDate(anchor);
   } else if (preset === "year") {
@@ -737,6 +752,7 @@ function auditLabel(event) {
     user_approved: "Usuario aprobado",
     user_deactivated: "Usuario desactivado",
     import_previewed: "Archivo validado",
+    import_preview_cancelled: "Carga cancelada",
     import_completed: "Archivo importado",
     initial_data_loaded: "Carga inicial de datos",
   };
@@ -945,8 +961,9 @@ function renderImportPreview(preview) {
   }
 
   html += '<p class="import-no-filter">' + escapeHTML(preview.message) + '</p>' +
+    '<div class="import-actions"><button id="cancel-import" class="button button-outline import-cancel" type="button">Cancelar carga</button>' +
     '<button id="commit-import" class="button button-primary" type="button">Incorporar ' +
-    Number(preview.rows).toLocaleString("es-CL") + ' movimientos</button>';
+    Number(preview.rows).toLocaleString("es-CL") + ' movimientos</button></div>';
   const container = $("#import-preview");
   container.innerHTML = html;
   container.hidden = false;
@@ -964,7 +981,33 @@ function renderImportPreview(preview) {
   $("#import-mode").addEventListener("change", updateButton);
   $$(".keep-import-row").forEach(input => input.addEventListener("change", updateButton));
   updateButton();
+  $("#cancel-import").addEventListener("click", cancelImport);
   $("#commit-import").addEventListener("click", commitImport);
+}
+
+async function cancelImport() {
+  if (!state.importPreview) return;
+  if (!window.confirm("¿Cancelar esta carga? Se eliminará la vista previa y el archivo no se incorporará.")) return;
+  const button = $("#cancel-import");
+  if (!button) return;
+  button.disabled = true;
+  button.textContent = "Cancelando…";
+  try {
+    const result = await api("/api/admin/import/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ preview_token: state.importPreview.preview_token }),
+    });
+    state.importPreview = null;
+    $("#import-preview").hidden = true;
+    $("#import-preview").innerHTML = "";
+    $("#import-form").reset();
+    toast(result.message, "success");
+  } catch (error) {
+    toast(error.message, "error");
+    button.disabled = false;
+    button.textContent = "Cancelar carga";
+  }
 }
 
 async function commitImport() {
@@ -1142,6 +1185,12 @@ $("#detail-year").addEventListener("change", () => {
 });
 $$("[data-period-view][data-period-preset]").forEach((button) => {
   button.addEventListener("click", () => applyPeriodPreset(button.dataset.periodView, button.dataset.periodPreset));
+});
+$$('[data-filter-toggle]').forEach((button) => {
+  button.addEventListener('click', () => {
+    const prefix = button.dataset.filterToggle;
+    setFilterExpanded(prefix, !state.filterExpanded[prefix]);
+  });
 });
 document.addEventListener("click", (event) => {
   if (!event.target.closest(".month-selector")) {

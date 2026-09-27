@@ -2016,6 +2016,8 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 self.handle_user_status(conn)
             elif parsed.path == "/api/admin/import/preview":
                 self.handle_import_preview(conn)
+            elif parsed.path == "/api/admin/import/cancel":
+                self.handle_import_cancel(conn)
             elif parsed.path == "/api/admin/import/commit":
                 self.handle_import_commit(conn)
             else:
@@ -2300,6 +2302,32 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 **analysis,
             },
         )
+
+    def handle_import_cancel(self, conn: sqlite3.Connection):
+        actor = self.require_treasurer(conn)
+        if not actor:
+            return
+        payload = self.parse_json_body()
+        token = normalize_text(payload.get("preview_token"))
+        if not token:
+            raise ValueError("No se indicó la carga pendiente.")
+        lock_clause = " FOR UPDATE" if isinstance(conn, PostgresConnection) else ""
+        preview = conn.execute(
+            "SELECT * FROM import_previews WHERE token = ? AND created_by = ?" + lock_clause,
+            (token, actor["id"]),
+        ).fetchone()
+        if not preview:
+            raise ValueError("La carga pendiente ya no existe o no pertenece a tu cuenta.")
+        if preview["status"] == "completed":
+            raise ValueError("Esta carga ya fue incorporada y no puede cancelarse.")
+        conn.execute("DELETE FROM import_staging WHERE preview_token = ?", (token,))
+        conn.execute("DELETE FROM import_previews WHERE token = ? AND created_by = ?", (token, actor["id"]))
+        record_audit(conn, actor["id"], "import_preview_cancelled", {
+            "filename": preview["filename"],
+            "rows": int(preview["row_count"]),
+        })
+        conn.commit()
+        self.send_json(200, {"message": "Carga cancelada. El archivo no se incorporó."})
 
     def handle_import_commit(self, conn: sqlite3.Connection):
         if not isinstance(conn, PostgresConnection):
