@@ -239,21 +239,6 @@
               <button id="load-more-button" class="button button-outline" type="button">Mostrar más</button>
             </div>
           </article>
-          <section id="movement-review-panel" class="panel movement-review-panel" hidden>
-            <div class="panel-heading maintenance-heading">
-              <div><h2>Revisar movimiento</h2></div>
-              <button id="maintenance-back-detail" class="button button-outline" type="button">Cerrar revisión</button>
-            </div>
-            <div id="maintenance-result" hidden>
-              <pre id="maintenance-record"></pre>
-              <p id="maintenance-readonly-note" class="muted" hidden>Vista de consulta para tesorería. Los registros no se pueden eliminar desde esta cuenta.</p>
-              <div id="maintenance-delete-controls">
-                <p>La eliminación es permanente.</p>
-                <label class="admin-search">Tu contraseña<input id="maintenance-password" type="password" autocomplete="current-password"></label>
-                <button id="maintenance-delete" class="button button-outline" type="button">Eliminar este movimiento</button>
-              </div>
-            </div>
-          </section>
           <p class="scope-footnote">Se muestran Fecha Movimiento y Fecha del Evento. El saldo acumulado sigue la fecha contable del movimiento.</p>
         </section>
 
@@ -305,6 +290,26 @@
           </section>
         </section>
       </main>
+
+      <div id="movement-review-panel" class="movement-review-modal" hidden aria-hidden="true">
+        <div class="movement-review-scrim" data-review-close></div>
+        <section class="movement-review-card" role="dialog" aria-modal="true" aria-labelledby="movement-review-title">
+          <div class="panel-heading maintenance-heading">
+            <div><h2 id="movement-review-title">Revisar movimiento</h2></div>
+            <button id="maintenance-back-detail" class="button button-outline" type="button" data-review-close>Cerrar</button>
+          </div>
+          <p id="maintenance-loading" class="movement-review-loading" role="status">Consultando movimiento…</p>
+          <div id="maintenance-result" hidden>
+            <pre id="maintenance-record"></pre>
+            <p id="maintenance-readonly-note" class="muted" hidden>Vista de consulta para tesorería. Los registros no se pueden eliminar desde esta cuenta.</p>
+            <div id="maintenance-delete-controls">
+              <p>La eliminación es permanente.</p>
+              <label class="admin-search">Tu contraseña<input id="maintenance-password" type="password" autocomplete="current-password"></label>
+              <button id="maintenance-delete" class="button button-outline" type="button">Eliminar este movimiento</button>
+            </div>
+          </div>
+        </section>
+      </div>
 
       <footer class="app-footer">
         <span>Iglesia UNACH · Tesorería</span>

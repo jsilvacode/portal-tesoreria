@@ -557,14 +557,20 @@ button, .button, .admin-actions .button, .pagination .button,
 .transaction-amount { text-align: right; }
 .maintenance-link { display: block; width: 100%; max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: right; }
 .maintenance-heading { align-items: center; }
-.movement-review-panel { margin-top: 14px; padding: 18px 20px 20px; }
+.modal-open { overflow: hidden; }
+.movement-review-modal { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 20px; }
+.movement-review-scrim { position: absolute; inset: 0; background: rgba(16, 35, 58, .48); backdrop-filter: blur(3px); }
+.movement-review-card { position: relative; width: min(720px, 100%); max-height: min(82svh, 720px); overflow: auto; padding: 20px 22px 22px; border: 1px solid #dbe5ef; border-radius: 16px; background: #fff; box-shadow: 0 22px 70px rgba(17, 38, 65, .28); }
+.movement-review-card .panel-heading { margin-bottom: 14px; }
+.movement-review-loading { margin: 22px 0 8px; color: #6d8099; }
 @media (min-width: 701px) {
   .transaction-row { grid-template-columns: 86px 78px minmax(150px, 1.1fr) minmax(180px, 1.7fr) minmax(150px, .95fr); }
 }
 
 /* On mobile, preserve the blue login treatment without the decorative photo. */
 @media (max-width: 680px) {
-  .movement-review-panel { padding: 15px 12px; }
+  .movement-review-modal { padding: 12px; }
+  .movement-review-card { max-height: 88svh; padding: 16px 14px 18px; border-radius: 14px; }
   .auth-main::before {
     background: linear-gradient(180deg, #123b70 0%, #245e9f 48%, rgba(247, 249, 252, .99) 100%);
   }

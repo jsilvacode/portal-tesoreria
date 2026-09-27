@@ -904,12 +904,13 @@ def insert_transaction(conn: sqlite3.Connection, batch_id: int, record: dict) ->
 
 
 def period_bounds(conn: sqlite3.Connection, start: str | None, end: str | None) -> tuple[str, str]:
-    limits = conn.execute(
-        "SELECT MIN(movement_date) AS min_date, MAX(movement_date) AS max_date FROM transactions"
-    ).fetchone()
-    today = date.today().isoformat()
-    start = start or limits["min_date"] or today
-    end = end or limits["max_date"] or today
+    if not start or not end:
+        limits = conn.execute(
+            "SELECT MIN(movement_date) AS min_date, MAX(movement_date) AS max_date FROM transactions"
+        ).fetchone()
+        today = date.today().isoformat()
+        start = start or limits["min_date"] or today
+        end = end or limits["max_date"] or today
     try:
         start = date.fromisoformat(start).isoformat()
         end = date.fromisoformat(end).isoformat()
@@ -1753,6 +1754,47 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                     self.send_json(200, {"user": None})
                     return
                 self.send_json(200, session_metadata(conn, user))
+            elif parsed.path == "/api/detail":
+                user = self.require_user(conn)
+                if not user:
+                    return
+                start, end = period_bounds(conn, (query.get("start") or [None])[0], (query.get("end") or [None])[0])
+                year, months = parse_calendar_filters(
+                    (query.get("year") or [None])[0],
+                    (query.get("months") or [None])[0],
+                )
+                requested = (query.get("department") or [None])[0]
+                scope = resolve_summary_department(user, requested, "department")
+                search = ((query.get("q") or [""])[0] or "").strip()[:120]
+                page = max(1, int((query.get("page") or ["1"])[0]))
+                cursor = None
+                cursor_date = (query.get("cursor_date") or [""])[0]
+                cursor_id_raw = (query.get("cursor_id") or [""])[0]
+                if cursor_date or cursor_id_raw:
+                    try:
+                        date.fromisoformat(cursor_date)
+                        cursor_id = int(cursor_id_raw)
+                        if cursor_id <= 0:
+                            raise ValueError
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError("El cursor de movimientos no es válido.") from exc
+                    cursor = (cursor_date, cursor_id)
+                report = get_summary(conn, start, end, scope, year, months)
+                page_data = get_transactions_page(
+                    conn, start, end, scope, search or None, year, months,
+                    page=page, page_size=25, cursor=cursor,
+                )
+                record_audit(conn, user["id"], "report_viewed", {
+                    "scope": scope or "all_departments", "start": start, "end": end,
+                    "year": year, "months": months or [],
+                })
+                if not search and page == 1:
+                    record_audit(conn, user["id"], "transactions_viewed", {
+                        "scope": scope or "all_departments", "start": start, "end": end,
+                        "year": year, "months": months or [],
+                    })
+                conn.commit()
+                self.send_json(200, {"report": report, **page_data, "scope": scope or "all_departments"})
             elif parsed.path == "/api/summary":
                 user = self.require_user(conn)
                 if not user:
@@ -1804,7 +1846,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                     except (TypeError, ValueError) as exc:
                         raise ValueError("El cursor de movimientos no es válido.") from exc
                     cursor = (cursor_date, cursor_id)
-                if not search:
+                if not search and page == 1:
                     record_audit(conn, user["id"], "transactions_viewed", {
                         "scope": scope or "all_departments", "start": start, "end": end,
                         "year": year, "months": months or [],

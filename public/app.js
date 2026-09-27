@@ -4,7 +4,9 @@ const state = {
   dateRange: null,
   period: { start: "", end: "", year: "", months: [], preset: "all" },
   globalReport: null,
+  globalQueryKey: null,
   detailReport: null,
+  detailQueryKey: null,
   selectedDepartment: null,
   transactionPage: 1,
   transactionPages: 1,
@@ -283,6 +285,11 @@ function showAuth() {
   state.globalSearchRequest += 1;
   state.transactionRequest += 1;
   state.user = null;
+  state.globalReport = null;
+  state.globalQueryKey = null;
+  state.detailReport = null;
+  state.detailQueryKey = null;
+  state.users = [];
   $("#app-shell").hidden = true;
   $("#auth-screen").hidden = false;
   setAuthMode("login");
@@ -447,6 +454,9 @@ function renderDepartmentRows(report) {
 async function loadGlobalReport() {
   const period = periodQuery("global");
   if (period === null) return false;
+  const department = state.user.role === "treasurer" ? $("#global-department").value : "";
+  const queryKey = period + "&department=" + department;
+  if (state.globalReport && state.globalQueryKey === queryKey) return true;
   if (state.globalReportController) state.globalReportController.abort();
   if ($("#global-search").value.trim()) {
     if (state.globalSearchController) state.globalSearchController.abort();
@@ -460,7 +470,6 @@ async function loadGlobalReport() {
   const controller = new AbortController();
   state.globalReportController = controller;
   const requestId = ++state.globalReportRequest;
-  const department = state.user.role === "treasurer" ? $("#global-department").value : "";
   const params = new URLSearchParams(period);
   if (department) params.set("department", department);
   const query = params.toString();
@@ -469,6 +478,7 @@ async function loadGlobalReport() {
     const report = await api("/api/summary?" + query, { signal: controller.signal });
     if (requestId !== state.globalReportRequest) return;
     state.globalReport = report;
+    state.globalQueryKey = queryKey;
     renderMetrics($("#global-metrics"), report);
     updateBalanceNote(report);
     renderChart($("#global-chart"), report.monthly);
@@ -573,6 +583,9 @@ async function loadDepartmentReport(append = false, refreshSummary = true) {
   if (append && state.detailFilterDirty) return;
   const query = detailQuery();
   if (query === null) return;
+  const search = $("#detail-search").value.trim();
+  const queryKey = query + "&q=" + encodeURIComponent(search);
+  if (!append && !state.detailFilterDirty && state.detailReport && state.detailQueryKey === queryKey && state.transactionLoaded) return;
   const shouldRefreshSummary = refreshSummary || state.detailFilterDirty || !state.detailReport;
   if (state.transactionController) state.transactionController.abort();
   const controller = new AbortController();
@@ -580,7 +593,6 @@ async function loadDepartmentReport(append = false, refreshSummary = true) {
   if (!append) state.detailFilterDirty = false;
   const requestedPage = append ? state.transactionPage + 1 : 1;
   const requestId = ++state.transactionRequest;
-  const search = $("#detail-search").value.trim();
   const button = $("#load-more-button");
   state.transactionLoading = true;
   button.disabled = true;
@@ -591,8 +603,6 @@ async function loadDepartmentReport(append = false, refreshSummary = true) {
     $("#page-label").textContent = "";
   }
   try {
-    const summaryPromise = append || (!shouldRefreshSummary && state.detailReport)
-      ? Promise.resolve(state.detailReport) : api("/api/summary?" + query, { signal: controller.signal });
     const transactionParams = new URLSearchParams(query);
     if (search) transactionParams.set("q", search);
     if (append && state.transactionCursor) {
@@ -600,12 +610,19 @@ async function loadDepartmentReport(append = false, refreshSummary = true) {
       transactionParams.set("cursor_id", state.transactionCursor.id);
     }
     transactionParams.set("page", requestedPage);
-    const transactionPromise = api("/api/transactions?" + transactionParams.toString(), { signal: controller.signal });
-    const results = await Promise.all([summaryPromise, transactionPromise]);
+    let report;
+    let pageData;
+    if (!append && shouldRefreshSummary) {
+      const combined = await api("/api/detail?" + transactionParams.toString(), { signal: controller.signal });
+      report = combined.report;
+      pageData = combined;
+    } else {
+      report = shouldRefreshSummary ? await api("/api/summary?" + query, { signal: controller.signal }) : state.detailReport;
+      pageData = await api("/api/transactions?" + transactionParams.toString(), { signal: controller.signal });
+    }
     if (requestId !== state.transactionRequest) return;
-    const report = results[0];
-    const pageData = results[1];
     state.detailReport = report;
+    state.detailQueryKey = queryKey;
     state.transactionPage = pageData.page;
     state.transactionPages = pageData.pages;
     state.transactionTotal = pageData.total;
@@ -785,7 +802,8 @@ async function openAdminTab(tab) {
       $("#audit-list").innerHTML = '<p class="muted">Selecciona los filtros y pulsa Consultar.</p>';
       $("#audit-count").textContent = "";
       $("#audit-more").hidden = true;
-      const data = await api("/api/admin/users");
+      const data = {users: state.users.length ? state.users : (await api("/api/admin/users")).users};
+      if (!state.users.length) state.users = data.users;
       const selected = $("#audit-user").value;
       $("#audit-user").innerHTML = '<option value="">Todos los usuarios</option>' + data.users.map(u => '<option value="' + u.id + '">' + escapeHTML(u.email) + '</option>').join("");
       $("#audit-user").value = selected;
@@ -985,6 +1003,10 @@ async function commitImport() {
     state.departments = metadata.departments || [];
     populateDepartmentOptions(state.departments);
     refreshPeriodRange(metadata.dateRange);
+    state.globalReport = null;
+    state.globalQueryKey = null;
+    state.detailReport = null;
+    state.detailQueryKey = null;
     state.transactionLoaded = 0;
     state.transactionCursor = null;
     const reportLoaded = await loadGlobalReport();
@@ -1150,6 +1172,10 @@ document.addEventListener("click", (event) => {
   }
 });
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("#movement-review-panel").hidden) {
+    resetMaintenance();
+    return;
+  }
   if (event.key === "Escape") $$(".month-selector[open]").forEach((selector) => { selector.open = false; });
 });
 $("#global-start").addEventListener("change", () => { state.period.preset = "custom"; });
@@ -1255,29 +1281,43 @@ function maintenanceButton(kind, id) {
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-maintenance-id]");
   if (!button || state.user?.role !== "treasurer") return;
-  resetMaintenance();
+  resetMaintenance(false);
+  maintenanceReturnFocus = button;
   const selection = {kind: "movement", id: Number(button.dataset.maintenanceId)};
-  $("#movement-review-panel").hidden = false;
+  const modal = $("#movement-review-panel");
+  modal.hidden = false;
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  $("#maintenance-loading").hidden = false;
   try {
     const result = await api("/api/superuser/record", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({...selection, action: "preview"})});
     maintenanceSelection = {...selection, fingerprint: result.fingerprint};
     renderMaintenanceRecord(result.record);
+    $("#maintenance-loading").hidden = true;
     $("#maintenance-result").hidden = false;
-    $("#movement-review-panel").scrollIntoView({behavior: "smooth", block: "start"});
+    $("#maintenance-back-detail").focus();
   } catch (error) {
-    $("#movement-review-panel").hidden = true;
+    resetMaintenance();
     toast(error.message, "error");
   }
 });
 let maintenanceSelection = null;
-function resetMaintenance() {
+let maintenanceReturnFocus = null;
+function resetMaintenance(restoreFocus = true) {
   maintenanceSelection = null;
-  $("#movement-review-panel").hidden = true;
+  const modal = $("#movement-review-panel");
+  modal.hidden = true;
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+  $("#maintenance-loading").hidden = true;
   $("#maintenance-result").hidden = true;
   $("#maintenance-password").value = "";
+  const returnFocus = maintenanceReturnFocus;
+  maintenanceReturnFocus = null;
+  if (restoreFocus && returnFocus && returnFocus.isConnected) returnFocus.focus();
 }
-$("#maintenance-back-detail").addEventListener("click", () => {
-  resetMaintenance();
+$("#movement-review-panel").addEventListener("click", (event) => {
+  if (event.target.closest("[data-review-close]")) resetMaintenance();
 });
 function renderMaintenanceRecord(record) {
   const labels = {id: "ID", batch_id: "Lote", source_row: "Fila de origen", department_id: "Código de departamento", department_name: "Departamento", opening_balance: "Saldo inicial", movement_type_number: "Código de movimiento", movement_type: "Tipo", movement_date: "Fecha contable", event_date: "Fecha del evento", amount: "Importe", description: "Glosa", base_person_id: "Código de persona", server_id: "Código de servidor", donor_name: "Aportante", currency: "Moneda", total_by_currency: "Total por moneda", observations: "Observaciones", email: "Correo", role: "Rol", status: "Estado", created_at: "Creación", approved_at: "Aprobación", user_id: "ID de usuario", event_type: "Acción", detail: "Detalle"};
@@ -1296,7 +1336,9 @@ $("#maintenance-delete").addEventListener("click", async () => {
     const result = await api("/api/superuser/record", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({...maintenanceSelection, action: "delete", password: $("#maintenance-password").value})});
     resetMaintenance();
     state.globalReport = null;
+    state.globalQueryKey = null;
     state.detailReport = null;
+    state.detailQueryKey = null;
     state.detailFilterDirty = true;
     toast(result.message, "success");
   } catch (error) { toast(error.message, "error"); }
