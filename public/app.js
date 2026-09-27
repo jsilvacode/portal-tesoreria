@@ -259,9 +259,9 @@ async function showApp(user, metadata) {
   state.selectedDepartment = user.role === "department" ? user.department_name : null;
   $("#auth-screen").hidden = true;
   $("#app-shell").hidden = false;
-  $("#user-badge").textContent = user.role === "treasurer"
-    ? user.email + (user.is_superuser ? " · Superusuario" : " · Tesorero")
-    : user.email;
+  const userType = user.is_superuser ? "Superusuario" : user.role === "treasurer" ? "Tesorero" : "Usuario de departamento";
+  $("#user-badge").innerHTML = '<span class="user-email">' + escapeHTML(user.email) + '</span>' +
+    '<span class="user-role">' + escapeHTML(userType) + '</span>';
   $("#department-nav-label").textContent = user.role === "treasurer" ? "Detalle" : "Mi departamento";
   $$(".admin-nav").forEach((item) => { item.hidden = user.role !== "treasurer"; });
   $("#global-department-filter").hidden = user.role !== "treasurer";
