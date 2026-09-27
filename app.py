@@ -1361,7 +1361,7 @@ def export_xlsx(summary: dict, transactions: list[dict] | None) -> bytes:
             "Aportante",
             "Observaciones",
             "Importe firmado",
-            "Saldo corrido",
+            "Saldo acumulado",
         ]
         detail.append(headers)
         for row in transactions:

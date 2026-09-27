@@ -659,7 +659,7 @@ function transactionRowHTML(row) {
     '<div class="transaction-description">' + escapeHTML(row.description || "Sin glosa") + observations + '</div>' +
     donor +
     '<div class="transaction-amount ' + amountClass + '">' + (row.amount > 0 ? "+" : "") + money(row.amount) +
-      '<small>Saldo corrido ' + money(row.running_balance) + '</small>' + maintenanceButton('movement', row.id) + '</div>' +
+      '<small>Saldo acumulado ' + money(row.running_balance) + '</small>' + maintenanceButton('movement', row.id) + '</div>' +
     '</article>';
 }
 
