@@ -1825,13 +1825,17 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 user = self.require_treasurer(conn)
                 if not user:
                     return
-                rows = conn.execute(
-                    """SELECT u.id, u.email, u.role, u.department_name, u.status, u.created_at,
-                              u.approved_at
-                       FROM users u ORDER BY
-                         CASE u.status WHEN 'pending' THEN 0 WHEN 'active' THEN 1 ELSE 2 END,
-                         u.created_at DESC"""
-                ).fetchall()
+                user_sql = """SELECT u.id, u.email, u.role, u.department_name, u.status, u.created_at,
+                                     u.approved_at
+                              FROM users u"""
+                user_params = []
+                if not user.get("is_superuser") and superuser_id() > 0:
+                    user_sql += " WHERE u.id <> ?"
+                    user_params.append(superuser_id())
+                user_sql += """ ORDER BY
+                                 CASE u.status WHEN 'pending' THEN 0 WHEN 'active' THEN 1 ELSE 2 END,
+                                 u.created_at DESC"""
+                rows = conn.execute(user_sql, user_params).fetchall()
                 self.send_json(200, {"users": [effective_user(dict(row)) for row in rows]})
             elif parsed.path == "/api/admin/audit":
                 user = self.require_treasurer(conn)
@@ -1842,6 +1846,9 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 department = ((query.get("department") or [""])[0] or "").strip()
                 search = ((query.get("q") or [""])[0] or "").strip()[:120]
                 where, params = [], []
+                if not user.get("is_superuser") and superuser_id() > 0:
+                    where.append("(a.user_id IS NULL OR a.user_id <> ?)")
+                    params.append(superuser_id())
                 audit_user = ((query.get("user_id") or [""])[0] or "").strip()
                 if audit_user:
                     where.append("a.user_id = ?")
@@ -2097,6 +2104,13 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         row = conn.execute("SELECT * FROM " + table + " WHERE id = ?" + lock, (record_id,)).fetchone()
         if not row:
             raise ValueError("El registro no existe.")
+        if not actor.get("is_superuser") and superuser_id() > 0:
+            if kind == "user" and record_id == superuser_id():
+                self.send_json(403, {"error": "La cuenta root no está disponible para tesorería."})
+                return
+            if kind == "activity" and row["user_id"] == superuser_id():
+                self.send_json(403, {"error": "La actividad de la cuenta root no está disponible para tesorería."})
+                return
         visible = {k: v for k, v in dict(row).items() if k != "password_hash"}
         fingerprint = hashlib.sha256(json.dumps(visible, sort_keys=True, default=str).encode()).hexdigest()
         if payload.get("action") == "preview":
