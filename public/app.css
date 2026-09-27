@@ -554,7 +554,8 @@ button, .button, .admin-actions .button, .pagination .button,
 .transaction-row > * { min-width: 0; }
 .transaction-amount { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .transaction-amount small { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
-.maintenance-link { max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: right; }
+.transaction-amount { text-align: right; }
+.maintenance-link { display: block; width: 100%; max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: right; }
 .maintenance-heading { align-items: center; }
 @media (min-width: 701px) {
   .transaction-row { grid-template-columns: 86px 78px minmax(150px, 1.1fr) minmax(180px, 1.7fr) minmax(150px, .95fr); }
