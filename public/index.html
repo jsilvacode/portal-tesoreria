@@ -251,7 +251,8 @@
           <div class="admin-tabs" role="tablist" aria-label="Herramientas del tesorero">
             <button class="admin-tab is-active" data-admin-tab="users" type="button">Usuarios</button>
             <button class="admin-tab" data-admin-tab="import" type="button">Cargar contabilidad</button>
-            <button class="admin-tab" data-admin-tab="audit" type="button">Actividad</button>
+            <button class="admin-tab" data-admin-tab="audit" type="button">Consultar bitácora</button>
+            <button id="superuser-tab" class="admin-tab" data-admin-tab="maintenance" type="button" hidden>Mantenimiento</button>
           </div>
           <section id="admin-users-panel" class="admin-panel panel">
             <div class="panel-heading"><div><h2>Usuarios</h2></div></div>
@@ -271,16 +272,32 @@
             <div id="import-preview" class="import-preview" hidden></div>
             <div class="import-policy"><strong>Revisión de carga:</strong> no se eliminan filas automáticamente. Se mostrarán los períodos superpuestos y las coincidencias para que el tesorero decida antes de incorporar.</div>
           </section>
+          <section id="admin-maintenance-panel" class="admin-panel panel" hidden>
+            <h2>Mantenimiento · Superusuario</h2>
+            <div class="audit-filters">
+              <label>Tipo<select id="maintenance-kind"><option value="movement">Movimiento contable</option><option value="user">Usuario</option><option value="activity">Evento de bitácora</option></select></label>
+              <label>ID del registro<input id="maintenance-id" type="number" min="1" step="1"></label>
+              <button id="maintenance-preview" class="button button-outline" type="button">Revisar registro</button>
+            </div>
+            <div id="maintenance-result" hidden>
+              <pre id="maintenance-record"></pre>
+              <p>La eliminación es permanente. Al eliminar un usuario se cierran sus sesiones y se conservan sus movimientos contables.</p>
+              <label class="admin-search">Tu contraseña<input id="maintenance-password" type="password" autocomplete="current-password"></label>
+              <button id="maintenance-delete" class="button button-outline" type="button">Eliminar este registro</button>
+            </div>
+          </section>
           <section id="admin-audit-panel" class="admin-panel panel" hidden>
-            <div class="panel-heading"><div><h2>Actividad reciente</h2></div></div>
+            <div class="panel-heading"><div><h2>Consultar bitácora</h2></div></div>
             <div class="audit-filters">
               <label>Desde<input id="audit-start" type="date"></label>
               <label>Hasta<input id="audit-end" type="date"></label>
               <label>Departamento<select id="audit-department"><option value="">Todos</option></select></label>
+              <label>Usuario<select id="audit-user"><option value="">Todos los usuarios</option></select></label>
               <label class="search-control">Buscar<input id="audit-search" type="search" autocomplete="off" placeholder="Usuario o acción"></label>
-              <button id="audit-filter-button" class="button button-outline" type="button">Aplicar</button>
+              <button id="audit-filter-button" class="button button-primary" type="button">Consultar</button>
+              <button id="audit-export" class="button button-outline" type="button">Exportar CSV</button>
             </div>
-            <div id="audit-list" class="admin-list"></div>
+            <div id="audit-list" class="admin-list"><p class="muted">Selecciona los filtros y pulsa Consultar.</p></div>
             <div class="audit-pagination">
               <span id="audit-count" class="muted"></span>
               <button id="audit-more" class="button button-outline" type="button" hidden>Mostrar más</button>

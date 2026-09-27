@@ -139,6 +139,94 @@ class TreasuryTests(unittest.TestCase):
             )
         self._insert("Departamento Sur", "2026-09-30", -500, description="Egreso de prueba")
 
+    def test_reconciliation_counts_occurrences_and_keeps_late_movements(self):
+        row = dict(self.conn.execute("SELECT * FROM transactions ORDER BY id LIMIT 1").fetchone())
+        first = {**row, "source_row": 2}
+        second = {**row, "source_row": 3}
+        late = {**row, "source_row": 4, "description": "Movimiento registrado después"}
+        analysis = app.analyze_import(self.conn, [first, second, late])
+        self.assertEqual(analysis["matched_rows"], [2])
+        self.assertEqual(analysis["new_rows"], 2)
+        self.assertEqual(analysis["file_repeats"], 1)
+
+    def test_reconcile_commit_excludes_only_reviewed_occurrences(self):
+        row = dict(self.conn.execute("SELECT * FROM transactions ORDER BY id LIMIT 1").fetchone())
+        records = [{**row, "source_row": 2}, {**row, "source_row": 3, "description": "Nuevo del mismo día"}]
+        analysis = app.analyze_import(self.conn, records)
+        self.conn.execute("INSERT INTO import_previews(token, filename, file_sha256, row_count, created_by, created_at) VALUES ('reconcile', 'x.xlsx', 'abc', 2, 1, ?)", (app.utc_now(),))
+        for record in records:
+            self.conn.execute("INSERT INTO import_staging(preview_token, record_json) VALUES ('reconcile', ?)", (json.dumps(record),))
+        self.conn.commit()
+        handler = CommitHandler({"preview_token": "reconcile", "mode": "reconcile", "review_signature": analysis["review_signature"], "confirm_matches": True}, 1)
+        handler.handle_import_commit(self.conn)
+        self.assertEqual(handler.response[0], 201)
+        self.assertEqual(handler.response[1]["rows"], 1)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0], 36)
+        handler.handle_import_commit(self.conn)
+        self.assertEqual(handler.response[1]["rows"], 1)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0], 36)
+
+    def test_changed_accounting_requires_new_reconciliation_review(self):
+        row = dict(self.conn.execute("SELECT * FROM transactions ORDER BY id LIMIT 1").fetchone())
+        before = app.analyze_import(self.conn, [row])
+        self._insert(row["department_name"], row["movement_date"], 500, description="Carga concurrente")
+        after = app.analyze_import(self.conn, [row])
+        self.assertNotEqual(before["review_signature"], after["review_signature"])
+
+    def test_audit_user_filter_and_csv_use_the_same_selection(self):
+        app.record_audit(self.conn, 1, 'report_viewed', {"scope": "Departamento Norte"})
+        app.record_audit(self.conn, None, 'system', {})
+        self.conn.commit()
+        request = AuditRequestHandler('/api/admin/audit?user_id=1&department=Departamento+Norte&format=csv', 1)
+        request.send_bytes = lambda status, body, content_type, filename: setattr(request, 'response', (status, body.decode('utf-8-sig')))
+        connector = app.connect
+        with patch('app.connect', side_effect=lambda: connector(self.db_path)):
+            request.do_GET()
+        self.assertEqual(request.response[0], 200)
+        self.assertIn('report_viewed', request.response[1])
+        self.assertNotIn(';system;', request.response[1])
+
+    def test_superuser_delete_rejects_wrong_password(self):
+        handler = CommitHandler({"kind": "movement", "id": 1, "action": "preview"}, 1)
+        handler.require_user = lambda conn: {"id": 1, "role": "treasurer", "is_superuser": True}
+        with patch.dict(app.os.environ, {"UNACH_SUPERUSER_ID": "1"}):
+            handler.handle_superuser_record(self.conn)
+            fingerprint = handler.response[1]["fingerprint"]
+            self.conn.rollback()
+            handler._payload.update(action="delete", fingerprint=fingerprint, password="wrong")
+            handler.handle_superuser_record(self.conn)
+        self.assertEqual(handler.response[0], 403)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0], 35)
+
+    def test_superuser_requires_configured_active_account(self):
+        user = {"id": 1, "status": "active", "email": "owner@example.test", "role": "department", "department_name": "Departamento Norte"}
+        with patch.dict(app.os.environ, {"UNACH_SUPERUSER_ID": "1"}):
+            self.assertTrue(app.effective_user(user)["is_superuser"])
+            self.assertEqual(app.effective_user(user)["role"], "treasurer")
+            self.assertFalse(app.effective_user({**user, "status": "inactive"})["is_superuser"])
+            self.assertFalse(app.effective_user({**user, "id": 2})["is_superuser"])
+
+    def test_treasurer_cannot_use_destructive_endpoint(self):
+        handler = CommitHandler({"kind": "movement", "id": 1, "action": "delete"}, 1)
+        handler.require_user = lambda conn: {"id": 1, "role": "treasurer"}
+        handler.handle_superuser_record(self.conn)
+        self.assertEqual(handler.response[0], 403)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0], 35)
+
+    def test_superuser_can_preview_and_delete_exact_record(self):
+        handler = CommitHandler({"kind": "movement", "id": 1, "action": "preview"}, 1)
+        handler.require_user = lambda conn: {"id": 1, "role": "treasurer", "is_superuser": True}
+        with patch.dict(app.os.environ, {"UNACH_SUPERUSER_ID": "1"}):
+            handler.handle_superuser_record(self.conn)
+            fingerprint = handler.response[1]["fingerprint"]
+            self.conn.rollback()
+            handler._payload.update(action="delete", fingerprint=fingerprint, password="test")
+            with patch("app.verify_password", return_value=True):
+                handler.handle_superuser_record(self.conn)
+        self.assertEqual(handler.response[0], 200)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0], 34)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM audit_log WHERE event_type = 'superuser_deleted'").fetchone()[0], 1)
+
     def test_summary_uses_constant_number_of_queries_and_keeps_skipped_months_in_closing(self):
         statements = []
         self.conn.set_trace_callback(statements.append)

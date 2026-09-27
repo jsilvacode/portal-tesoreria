@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import base64
 import calendar
+import csv
+from collections import Counter
 import hashlib
 import html
 import io
@@ -590,7 +592,24 @@ def record_audit(
     )
 
 
+def superuser_id() -> int:
+    try:
+        return int(os.environ.get("UNACH_SUPERUSER_ID", "0"))
+    except ValueError:
+        return 0
+
+
+def effective_user(user: dict) -> dict:
+    user = dict(user)
+    user["is_superuser"] = user["id"] == superuser_id() and user["status"] == "active"
+    if user["is_superuser"]:
+        user["role"] = "treasurer"
+        user["department_name"] = None
+    return user
+
+
 def session_metadata(conn, user: dict | None) -> dict:
+    user = effective_user(user) if user else None
     dates = conn.execute(
         "SELECT MIN(movement_date) AS start, MAX(movement_date) AS end FROM transactions"
     ).fetchone()
@@ -724,6 +743,8 @@ def analyze_import(conn, records: list[dict]) -> dict:
         )
 
     existing_exact = {}
+    existing_counts = Counter()
+    date_description = {}
     existing_without_department_id = {}
     existing_rows = conn.execute(
         """SELECT t.department_id, t.department_name, t.opening_balance,
@@ -743,6 +764,8 @@ def analyze_import(conn, records: list[dict]) -> dict:
             "source_row": stored.get("source_row"),
             "department_id": stored.get("department_id"),
         }
+        existing_counts[import_match_key(stored)] += 1
+        date_description.setdefault((stored["department_name"], stored["movement_date"], stored["event_date"], stored["description"]), origin)
         existing_exact.setdefault(import_match_key(stored), origin)
         existing_without_department_id.setdefault(import_match_key(stored, core_fields), origin)
 
@@ -751,14 +774,20 @@ def analyze_import(conn, records: list[dict]) -> dict:
     internal_repeat_count = 0
     samples = []
     file_keys = set()
+    occurrence_counts = Counter()
+    matched_rows = []
     for record in records:
-        exact = existing_exact.get(import_match_key(record))
+        key = import_match_key(record)
+        occurrence_counts[key] += 1
+        if occurrence_counts[key] <= existing_counts[key]:
+            matched_rows.append(record["source_row"])
+        exact = existing_exact.get(key)
         if exact:
             exact_count += 1
             if len(samples) < IMPORT_MATCH_SAMPLE_LIMIT:
                 samples.append(import_review_sample(record, exact, "Coincidencia exacta"))
         else:
-            similar = existing_without_department_id.get(import_match_key(record, core_fields))
+            similar = existing_without_department_id.get(import_match_key(record, core_fields)) or date_description.get((record["department_name"], record["movement_date"], record["event_date"], record["description"]))
             if similar:
                 similar_count += 1
                 if len(samples) < IMPORT_MATCH_SAMPLE_LIMIT:
@@ -766,7 +795,7 @@ def analyze_import(conn, records: list[dict]) -> dict:
                         import_review_sample(
                             record,
                             similar,
-                            "Coincide en los demás campos; revisar DEPARTMENT_ID",
+                            "Coincidencia parcial: revisar fechas, glosa y demás campos",
                         )
                     )
         key = import_match_key(record)
@@ -780,6 +809,9 @@ def analyze_import(conn, records: list[dict]) -> dict:
             file_keys.add(key)
 
     return {
+        "matched_rows": matched_rows,
+        "new_rows": len(records) - len(matched_rows),
+        "review_signature": hashlib.sha256(json.dumps(sorted((repr(k), v) for k, v in existing_counts.items())).encode()).hexdigest(),
         "period": {"start": start, "end": end},
         "overlapping_batches": overlaps[:8],
         "overlap_count": len(overlaps),
@@ -1685,7 +1717,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             if row:
                 conn.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
             return None
-        return dict(row)
+        return effective_user(dict(row))
 
     def require_user(self, conn: sqlite3.Connection) -> dict | None:
         user = self.current_user(conn)
@@ -1800,7 +1832,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                          CASE u.status WHEN 'pending' THEN 0 WHEN 'active' THEN 1 ELSE 2 END,
                          u.created_at DESC"""
                 ).fetchall()
-                self.send_json(200, {"users": [dict(row) for row in rows]})
+                self.send_json(200, {"users": [effective_user(dict(row)) for row in rows]})
             elif parsed.path == "/api/admin/audit":
                 user = self.require_treasurer(conn)
                 if not user:
@@ -1810,6 +1842,12 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 department = ((query.get("department") or [""])[0] or "").strip()
                 search = ((query.get("q") or [""])[0] or "").strip()[:120]
                 where, params = [], []
+                audit_user = ((query.get("user_id") or [""])[0] or "").strip()
+                if audit_user:
+                    where.append("a.user_id = ?")
+                    params.append(int(audit_user))
+                if start and end and start > end:
+                    raise ValueError("La fecha inicial debe ser anterior a la final.")
                 if start:
                     start_date = date.fromisoformat(start)
                     start_utc = datetime.combine(
@@ -1825,8 +1863,10 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                     where.append("a.created_at < ?")
                     params.append(end_utc)
                 if department:
-                    where.append("(u.department_name = ? OR a.detail LIKE ?)")
-                    params.extend((department, "%" + department + "%"))
+                    scope = "a.detail::jsonb ->> 'scope'" if isinstance(conn, PostgresConnection) else "json_extract(a.detail, '$.scope')"
+                    dept = "a.detail::jsonb ->> 'department'" if isinstance(conn, PostgresConnection) else "json_extract(a.detail, '$.department')"
+                    where.append("(" + scope + " = ? OR " + dept + " = ? OR (" + scope + " IS NULL AND " + dept + " IS NULL AND u.department_name = ?))")
+                    params.extend((department, department, department))
                 if search:
                     searchable = "a.created_at || ' ' || a.event_type || ' ' || a.detail || ' ' || COALESCE(u.email, '')"
                     normalized = (
@@ -1854,6 +1894,18 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 if where:
                     base_sql += " WHERE " + " AND ".join(where)
                 total = int(conn.execute("SELECT COUNT(*)" + base_sql, params).fetchone()[0])
+                if (query.get("format") or [""])[0] == "csv":
+                    if total > 20000:
+                        raise ValueError("Acota las fechas para exportar hasta 20.000 eventos.")
+                    rows = conn.execute("SELECT a.id, a.created_at, u.email, a.event_type, a.detail" + base_sql + " ORDER BY a.id DESC", params).fetchall()
+                    output = io.StringIO()
+                    writer = csv.writer(output, delimiter=";")
+                    writer.writerow(["ID", "Fecha UTC", "Usuario", "Acción", "Detalle"])
+                    for row in rows:
+                        values = [str(row[key] or "") for key in ("id", "created_at", "email", "event_type", "detail")]
+                        writer.writerow(["'" + v if v.lstrip().startswith(("=", "+", "-", "@")) else v for v in values])
+                    self.send_bytes(200, output.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8", "actividad.csv")
+                    return
                 cursor_raw = ((query.get("cursor_id") or [""])[0] or "").strip()
                 cursor_id = None
                 if cursor_raw:
@@ -1909,6 +1961,8 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 self.handle_register(conn)
             elif parsed.path == "/api/logout":
                 self.handle_logout(conn)
+            elif parsed.path == "/api/superuser/record":
+                self.handle_superuser_record(conn)
             elif parsed.path == "/api/admin/users/status":
                 self.handle_user_status(conn)
             elif parsed.path == "/api/admin/import/preview":
@@ -2017,6 +2071,53 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             ),
         )
 
+    def handle_superuser_record(self, conn):
+        actor = self.require_user(conn)
+        if not actor:
+            return
+        if not actor.get("is_superuser") or actor["id"] != superuser_id():
+            self.send_json(403, {"error": "Esta acción requiere superusuario."})
+            return
+        payload = self.parse_json_body()
+        kind = payload.get("kind")
+        tables = {"movement": "transactions", "user": "users", "activity": "audit_log"}
+        if kind not in tables:
+            raise ValueError("Selecciona el tipo de registro.")
+        record_id = int(payload.get("id") or 0)
+        if record_id <= 0:
+            raise ValueError("Indica un ID válido.")
+        if kind == "user" and record_id == actor["id"]:
+            raise ValueError("No puedes eliminar tu propia cuenta de superusuario.")
+        table = tables[kind]
+        if not isinstance(conn, PostgresConnection):
+            conn.execute("BEGIN IMMEDIATE")
+        if isinstance(conn, PostgresConnection):
+            conn.execute("SELECT pg_advisory_xact_lock(8260926)")
+        lock = " FOR UPDATE" if isinstance(conn, PostgresConnection) else ""
+        row = conn.execute("SELECT * FROM " + table + " WHERE id = ?" + lock, (record_id,)).fetchone()
+        if not row:
+            raise ValueError("El registro no existe.")
+        visible = {k: v for k, v in dict(row).items() if k != "password_hash"}
+        fingerprint = hashlib.sha256(json.dumps(visible, sort_keys=True, default=str).encode()).hexdigest()
+        if payload.get("action") == "preview":
+            self.send_json(200, {"record": visible, "fingerprint": fingerprint})
+            return
+        if payload.get("action") != "delete" or payload.get("fingerprint") != fingerprint:
+            raise ValueError("Revisa el registro actualizado antes de eliminarlo.")
+        account = conn.execute("SELECT password_hash FROM users WHERE id = ?", (actor["id"],)).fetchone()
+        if not verify_password(str(payload.get("password") or ""), account["password_hash"]):
+            self.send_json(403, {"error": "Contraseña incorrecta."})
+            return
+        if kind == "user":
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (record_id,))
+            conn.execute("DELETE FROM import_previews WHERE created_by = ?", (record_id,))
+            conn.execute("UPDATE import_batches SET imported_by = NULL WHERE imported_by = ?", (record_id,))
+            conn.execute("UPDATE audit_log SET user_id = NULL WHERE user_id = ?", (record_id,))
+        conn.execute("DELETE FROM " + table + " WHERE id = ?", (record_id,))
+        record_audit(conn, actor["id"], "superuser_deleted", {"kind": kind, "record_id": record_id})
+        conn.commit()
+        self.send_json(200, {"message": "Registro eliminado."})
+
     def handle_user_status(self, conn: sqlite3.Connection):
         actor = self.require_treasurer(conn)
         if not actor:
@@ -2031,6 +2132,8 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         ).fetchone()
         if not target:
             raise ValueError("No se encontró el usuario.")
+        if target["id"] == superuser_id():
+            raise ValueError("La cuenta de superusuario se administra fuera de tesorería.")
         if target["role"] == "treasurer" and target["id"] == actor["id"] and status == "inactive":
             raise ValueError("No puedes desactivar tu propia cuenta de tesorero.")
         approved_at = utc_now() if status == "active" else None
@@ -2144,6 +2247,8 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         if not actor:
             return
         payload = self.parse_json_body()
+        if isinstance(conn, PostgresConnection):
+            conn.execute("SELECT pg_advisory_xact_lock(8260926)")
         token = normalize_text(payload.get("preview_token"))
         lock_clause = " FOR UPDATE" if isinstance(conn, PostgresConnection) else ""
         preview = conn.execute(
@@ -2163,7 +2268,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "message": "Esta importación ya fue incorporada.",
-                    "rows": int(preview["row_count"]),
+                    "rows": int(conn.execute("SELECT COUNT(*) FROM transactions WHERE batch_id = ?", (preview["result_batch_id"],)).fetchone()[0]),
                     "batch_id": preview["result_batch_id"],
                     "already_completed": True,
                 },
@@ -2216,13 +2321,26 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        mode = payload.get("mode", "append")
+        if mode not in ("append", "reconcile"):
+            raise ValueError("Modo de incorporación inválido.")
+        if mode == "reconcile":
+            if payload.get("review_signature") != analysis["review_signature"]:
+                self.send_json(409, {"error": "La contabilidad cambió. Vuelve a validar el archivo para revisar las coincidencias actuales."})
+                return
+            matched = set(analysis["matched_rows"])
+            keep = {int(value) for value in payload.get("keep_rows", [])}
+            if not keep.issubset(matched):
+                raise ValueError("La selección de coincidencias no es válida.")
+            records = [record for record in records if record["source_row"] not in matched or record["source_row"] in keep]
+        inserted_count = len(records)
         batch_id = conn.execute(
             """INSERT INTO import_batches(filename, file_sha256, row_count, imported_by, imported_at)
                VALUES (?, ?, ?, ?, ?)""",
             (
                 preview["filename"],
                 preview["file_sha256"],
-                preview["row_count"],
+                inserted_count,
                 actor["id"],
                 utc_now(),
             ),
@@ -2280,7 +2398,9 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             "import_completed",
             {
                 "filename": preview["filename"],
-                "rows": preview["row_count"],
+                "mode": mode,
+                "source_rows": int(preview["row_count"]),
+                "rows": inserted_count,
                 "batch_id": batch_id,
                 "period": analysis["period"],
                 "overlap_count": analysis["overlap_count"],
@@ -2294,7 +2414,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             201,
             {
                 "message": "Importación completada.",
-                "rows": preview["row_count"],
+                "rows": inserted_count,
                 "batch_id": batch_id,
                 "warnings": analysis,
             },

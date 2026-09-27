@@ -252,13 +252,14 @@ function applyPeriodPreset(prefix, preset) {
 
 async function showApp(user, metadata) {
   state.user = user;
+  $("#superuser-tab").hidden = !user.is_superuser;
   state.departments = metadata.departments || [];
   state.dateRange = metadata.dateRange;
   state.selectedDepartment = user.role === "department" ? user.department_name : null;
   $("#auth-screen").hidden = true;
   $("#app-shell").hidden = false;
   $("#user-badge").textContent = user.role === "treasurer"
-    ? user.email + " · Tesorero"
+    ? user.email + (user.is_superuser ? " · Superusuario" : " · Tesorero")
     : user.email;
   $("#department-nav-label").textContent = user.role === "treasurer" ? "Detalle" : "Mi departamento";
   $$(".admin-nav").forEach((item) => { item.hidden = user.role !== "treasurer"; });
@@ -275,6 +276,7 @@ async function showApp(user, metadata) {
 }
 
 function showAuth() {
+  resetMaintenance();
   if (state.globalReportController) state.globalReportController.abort();
   if (state.globalSearchController) state.globalSearchController.abort();
   if (state.transactionController) state.transactionController.abort();
@@ -654,7 +656,7 @@ function transactionRowHTML(row) {
     '<div class="transaction-description">' + escapeHTML(row.description || "Sin glosa") + observations + '</div>' +
     donor +
     '<div class="transaction-amount ' + amountClass + '">' + (row.amount > 0 ? "+" : "") + money(row.amount) +
-      '<small>Saldo corrido ' + money(row.running_balance) + '</small></div>' +
+      '<small>Saldo corrido ' + money(row.running_balance) + '</small>' + maintenanceButton('movement', row.id) + '</div>' +
     '</article>';
 }
 
@@ -682,7 +684,7 @@ function renderAdminUsers() {
         '<span class="admin-secondary">' + escapeHTML(user.role === "treasurer" ? "Tesorería" : user.department_name) + '</span></div>' +
       '<div class="admin-secondary admin-created">' + shortDate(user.created_at.slice(0, 10)) + '</div>' +
       '<span class="status-pill status-' + user.status + '">' + labels[user.status] + '</span>' +
-      '<div class="admin-actions">' + (user.role === "treasurer" ? "" : actions[user.status]) + '</div>' +
+      '<div class="admin-actions">' + (user.role === "treasurer" ? "" : actions[user.status]) + maintenanceButton('user', user.id) + '</div>' +
       '<span class="admin-user-id" hidden>' + user.id + '</span>' +
     '</div>'
   ).join("") || '<div class="transaction-empty">' + (query ? "Sin coincidencias." : "Todavía no hay solicitudes.") + '</div>';
@@ -725,16 +727,21 @@ function auditLabel(event) {
   return labels[event] || event;
 }
 
+function auditParams() {
+  const params = new URLSearchParams();
+  for (const [id, key] of [["audit-start", "start"], ["audit-end", "end"], ["audit-department", "department"], ["audit-user", "user_id"], ["audit-search", "q"]]) {
+    const value = $("#" + id).value.trim();
+    if (value) params.set(key, value);
+  }
+  return params;
+}
+
 async function loadAudit(append = false) {
   if (state.auditController) state.auditController.abort();
   const controller = new AbortController();
   state.auditController = controller;
   const requestId = ++state.auditRequest;
-  const params = new URLSearchParams();
-  if ($("#audit-start").value) params.set("start", $("#audit-start").value);
-  if ($("#audit-end").value) params.set("end", $("#audit-end").value);
-  if ($("#audit-department").value) params.set("department", $("#audit-department").value);
-  if ($("#audit-search").value.trim()) params.set("q", $("#audit-search").value.trim());
+  const params = auditParams();
   if (append && state.auditCursor) params.set("cursor_id", state.auditCursor);
   if (!append) $("#audit-list").innerHTML = '<div class="loading">Cargando actividad…</div>';
   $("#audit-more").disabled = true;
@@ -749,7 +756,7 @@ async function loadAudit(append = false) {
     const context = Object.entries(detail).map(([key, value]) => key + ": " + value).join(" · ");
     return '<div class="audit-row">' +
       '<span>' + escapeHTML(new Date(row.created_at).toLocaleString("es-CL")) + '</span>' +
-      '<span class="audit-event">' + escapeHTML(auditLabel(row.event_type)) + '</span>' +
+      '<span class="audit-event">' + escapeHTML(auditLabel(row.event_type)) + maintenanceButton("activity", row.id) + '</span>' +
       '<span>' + escapeHTML(row.email || "Sistema") + (context ? " · " + escapeHTML(context) : "") + '</span>' +
       '</div>';
     }).join("");
@@ -772,7 +779,18 @@ async function openAdminTab(tab) {
   $$(".admin-panel").forEach((panel) => { panel.hidden = panel.id !== "admin-" + tab + "-panel"; });
   try {
     if (tab === "users") await loadAdminUsers();
-    if (tab === "audit") await loadAudit();
+    if (tab === "audit") {
+      if (state.auditController) state.auditController.abort();
+      state.auditRequest++;
+      state.auditCursor = null;
+      $("#audit-list").innerHTML = '<p class="muted">Selecciona los filtros y pulsa Consultar.</p>';
+      $("#audit-count").textContent = "";
+      $("#audit-more").hidden = true;
+      const data = await api("/api/admin/users");
+      const selected = $("#audit-user").value;
+      $("#audit-user").innerHTML = '<option value="">Todos los usuarios</option>' + data.users.map(u => '<option value="' + u.id + '">' + escapeHTML(u.email) + '</option>').join("");
+      $("#audit-user").value = selected;
+    }
   } catch (error) {
     toast(error.message, "error");
   }
@@ -835,8 +853,10 @@ function renderImportPreview(preview) {
     ' <span class="muted">(se cruza ' + shortDate(batch.overlap_start) + '–' +
     shortDate(batch.overlap_end) + ')</span></li>'
   ).join("");
+  const matchedRows = new Set(preview.matched_rows || []);
   const samples = (preview.match_samples || []).map((row) =>
     '<article class="import-match-card">' +
+    (row.comparison === 'Coincidencia exacta' && matchedRows.has(row.file_row) ? '<label><input type="checkbox" class="keep-import-row" value="' + Number(row.file_row) + '"> Conservar esta ocurrencia como nueva</label>' : '') +
       '<div class="import-match-top"><strong>Fila ' + Number(row.file_row) + ' · ' +
       escapeHTML(row.department) + '</strong><span>' + shortDate(row.date) + ' · ' +
       escapeHTML(money(row.amount)) + '</span></div>' +
@@ -858,9 +878,11 @@ function renderImportPreview(preview) {
     ' filas validadas.<br><span class="import-period">Período: ' +
     shortDate(preview.period.start) + '–' + shortDate(preview.period.end) + '</span>';
 
+  html += '<label class="admin-search">Tratamiento del archivo<select id="import-mode"><option value="reconcile">Actualizar: excluir ocurrencias ya registradas</option><option value="append">Agregar todas las filas, incluidas las coincidencias</option></select></label>' +
+    '<p>' + matchedRows.size.toLocaleString("es-CL") + ' ocurrencias ya registradas · ' + Number(preview.new_rows ?? preview.rows).toLocaleString("es-CL") + ' por incorporar antes de revisar excepciones.</p>';
   if (preview.same_file_warning) {
     html += '<div class="import-warning"><strong>Archivo ya incorporado</strong><br>' +
-      'El contenido completo coincide con una carga anterior. Si corresponde, podrás confirmar su incorporación.</div>';
+      'El contenido completo coincide con una carga anterior. En modo Actualizar se excluyen las ocurrencias ya registradas.</div>';
   }
 
   if (newDepartments.length) {
@@ -879,7 +901,7 @@ function renderImportPreview(preview) {
       (preview.overlaps_truncated ? '<small>Se muestran las 8 cargas más recientes con fechas compartidas.</small>' : "") +
       '</div>' +
       '<label class="import-confirm"><input id="confirm-import-overlap" type="checkbox">' +
-      '<span>Revisé los períodos y confirmo incorporar el archivo completo.</span></label>';
+      '<span>Revisé los períodos y el tratamiento seleccionado.</span></label>';
   } else {
     html += '<div class="import-clear">No hay períodos superpuestos con cargas anteriores.</div>';
   }
@@ -890,17 +912,17 @@ function renderImportPreview(preview) {
       ' en todos los campos contables conservados.</li>' : "") +
       (similarCount ? '<li>' + similarCount.toLocaleString("es-CL") +
       ' posible' + (similarCount === 1 ? "" : "s") + ' coincidencia' + (similarCount === 1 ? "" : "s") +
-      ' en los demás campos; revisar DEPARTMENT_ID.</li>' : "") +
+      ' parciales; revisar fechas, glosa y demás campos.</li>' : "") +
       (repeatCount ? '<li>' + repeatCount.toLocaleString("es-CL") +
       ' fila' + (repeatCount === 1 ? "" : "s") + ' idéntica' + (repeatCount === 1 ? "" : "s") +
       ' dentro del archivo.</li>' : "") + '</ul>' +
       '<details class="import-match-details"><summary>Revisar filas detectadas' +
       (preview.samples_truncated ? ' (primeras ' + (preview.match_samples || []).length + ')' : '') +
       '</summary><div class="import-match-list">' + samples + '</div>' +
-      (preview.samples_truncated ? '<small>Hay más coincidencias que las mostradas. No se excluye ni elimina ninguna fila automáticamente.</small>' : '') +
+      (preview.samples_truncated ? '<small>Hay más coincidencias que las mostradas. Las coincidencias completas se excluyen en modo Actualizar. Para excepciones fuera de esta muestra, divide el archivo antes de incorporarlo.</small>' : '') +
       '</details></div>' +
       '<label class="import-confirm"><input id="confirm-import-matches" type="checkbox">' +
-      '<span>Revisé las filas señaladas y confirmo incorporar todo el archivo, sin excluir movimientos.</span></label>';
+      '<span>Revisé las coincidencias y las posibles correcciones. Confirmo incorporar según el tratamiento seleccionado.</span></label>';
   } else {
     html += '<div class="import-clear">No se encontraron coincidencias completas ni filas idénticas dentro del archivo.</div>';
   }
@@ -915,10 +937,15 @@ function renderImportPreview(preview) {
     const overlapConfirmed = !overlapCount || $("#confirm-import-overlap").checked;
     const matchesConfirmed = !matchCount || $("#confirm-import-matches").checked;
     const departmentsConfirmed = !newDepartments.length || $("#confirm-import-new-departments").checked;
+    const count = $("#import-mode").value === "reconcile"
+      ? Number(preview.new_rows ?? preview.rows) + $$(".keep-import-row:checked").length : Number(preview.rows);
+    $("#commit-import").textContent = "Incorporar " + count.toLocaleString("es-CL") + " movimientos";
     $("#commit-import").disabled = !overlapConfirmed || !matchesConfirmed || !departmentsConfirmed;
   };
   [$("#confirm-import-overlap"), $("#confirm-import-matches"), $("#confirm-import-new-departments")].filter(Boolean)
     .forEach((checkbox) => checkbox.addEventListener("change", updateButton));
+  $("#import-mode").addEventListener("change", updateButton);
+  $$(".keep-import-row").forEach(input => input.addEventListener("change", updateButton));
   updateButton();
   $("#commit-import").addEventListener("click", commitImport);
 }
@@ -928,7 +955,7 @@ async function commitImport() {
   const commitButton = $("#commit-import");
   if (!commitButton || commitButton.disabled) return;
   let confirmSame = false;
-  if (state.importPreview.same_file_warning) {
+  if (state.importPreview.same_file_warning && $("#import-mode").value === "append") {
     confirmSame = window.confirm("Ya se importó antes un archivo con el mismo contenido. ¿Deseas incorporar esta copia completa como un nuevo lote?");
     if (!confirmSame) return;
   }
@@ -941,7 +968,10 @@ async function commitImport() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         preview_token: state.importPreview.preview_token,
-        confirm_same_file: confirmSame,
+        confirm_same_file: confirmSame || $("#import-mode").value === "reconcile",
+        mode: $("#import-mode").value,
+        review_signature: state.importPreview.review_signature,
+        keep_rows: $$(".keep-import-row:checked").map(input => Number(input.value)),
         confirm_overlap: !state.importPreview.overlap_count || $("#confirm-import-overlap").checked,
         confirm_new_departments: !(state.importPreview.new_departments || []).length ||
           $("#confirm-import-new-departments").checked,
@@ -1196,12 +1226,75 @@ $$(".export-button").forEach((button) => button.addEventListener("click", () => 
 $$(".admin-tab").forEach((button) => button.addEventListener("click", () => openAdminTab(button.dataset.adminTab)));
 $("#users-search").addEventListener("input", renderAdminUsers);
 $("#audit-filter-button").addEventListener("click", () => loadAudit().catch((error) => toast(error.message, "error")));
-$("#audit-start").addEventListener("change", () => loadAudit().catch((error) => toast(error.message, "error")));
-$("#audit-end").addEventListener("change", () => loadAudit().catch((error) => toast(error.message, "error")));
-$("#audit-department").addEventListener("change", () => loadAudit().catch((error) => toast(error.message, "error")));
-$("#audit-search").addEventListener("input", () => {
-  window.clearTimeout(state.auditSearchTimer);
-  state.auditSearchTimer = window.setTimeout(() => loadAudit().catch((error) => toast(error.message, "error")), 220);
+for (const id of ["audit-start", "audit-end", "audit-department", "audit-user", "audit-search"]) {
+  $("#" + id).addEventListener("input", () => {
+    if (state.auditController) state.auditController.abort();
+    state.auditRequest++;
+    state.auditCursor = null;
+    $("#audit-more").hidden = true;
+    $("#audit-count").textContent = "";
+    $("#audit-list").innerHTML = '<p class="muted">Pulsa Consultar para aplicar estos filtros.</p>';
+  });
+}
+$("#audit-export").addEventListener("click", async () => {
+  const button = $("#audit-export"); button.disabled = true;
+  try {
+    const params = auditParams(); params.set("format", "csv");
+    const response = await fetch("/api/admin/audit?" + params);
+    if (!response.ok) throw new Error((await response.json()).error || "No se pudo exportar.");
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a"); link.href = url; link.download = "actividad.csv"; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) { toast(error.message, "error"); }
+  finally { button.disabled = false; }
+});
+function maintenanceButton(kind, id) {
+  return state.user?.is_superuser ? '<button class="text-button maintenance-link" type="button" data-maintenance-kind="' + kind + '" data-maintenance-id="' + Number(id) + '">Revisar #' + Number(id) + '</button>' : "";
+}
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-maintenance-id]");
+  if (!button || !state.user?.is_superuser) return;
+  state.currentView = "admin"; updateNav();
+  await openAdminTab("maintenance");
+  resetMaintenance();
+  $("#maintenance-kind").value = button.dataset.maintenanceKind;
+  $("#maintenance-id").value = button.dataset.maintenanceId;
+  $("#maintenance-preview").click();
+});
+let maintenanceSelection = null;
+function resetMaintenance() {
+  maintenanceSelection = null;
+  $("#maintenance-result").hidden = true;
+  $("#maintenance-password").value = "";
+}
+for (const id of ["maintenance-kind", "maintenance-id"]) $("#" + id).addEventListener("input", resetMaintenance);
+$("#maintenance-preview").addEventListener("click", async () => {
+  resetMaintenance();
+  const selection = {kind: $("#maintenance-kind").value, id: Number($("#maintenance-id").value)};
+  try {
+    const result = await api("/api/superuser/record", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({...selection, action: "preview"})});
+    if (selection.kind !== $("#maintenance-kind").value || selection.id !== Number($("#maintenance-id").value)) return;
+    maintenanceSelection = {...selection, fingerprint: result.fingerprint};
+    const labels = {id: "ID", batch_id: "Lote", source_row: "Fila de origen", department_id: "Código de departamento", department_name: "Departamento", opening_balance: "Saldo inicial", movement_type_number: "Código de movimiento", movement_type: "Tipo", movement_date: "Fecha contable", event_date: "Fecha del evento", amount: "Importe", description: "Glosa", base_person_id: "Código de persona", server_id: "Código de servidor", donor_name: "Aportante", currency: "Moneda", total_by_currency: "Total por moneda", observations: "Observaciones", email: "Correo", role: "Rol", status: "Estado", created_at: "Creación", approved_at: "Aprobación", user_id: "ID de usuario", event_type: "Acción", detail: "Detalle"};
+    $("#maintenance-record").textContent = Object.entries(result.record).map(([key, value]) => {
+      const shown = ["amount", "opening_balance", "total_by_currency"].includes(key) && value != null ? money(value) : value ?? "—";
+      return (labels[key] || key) + ": " + shown;
+    }).join("\n");
+    $("#maintenance-result").hidden = false;
+  } catch (error) { toast(error.message, "error"); }
+});
+$("#maintenance-delete").addEventListener("click", async () => {
+  if (!maintenanceSelection || !window.confirm("¿Eliminar permanentemente el registro revisado?")) return;
+  const button = $("#maintenance-delete"); button.disabled = true;
+  try {
+    const result = await api("/api/superuser/record", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({...maintenanceSelection, action: "delete", password: $("#maintenance-password").value})});
+    resetMaintenance();
+    state.globalReport = null;
+    state.detailReport = null;
+    state.detailFilterDirty = true;
+    toast(result.message, "success");
+  } catch (error) { toast(error.message, "error"); }
+  finally { $("#maintenance-password").value = ""; button.disabled = false; }
 });
 $("#audit-more").addEventListener("click", () => {
   if (state.auditCursor) loadAudit(true).catch((error) => toast(error.message, "error"));

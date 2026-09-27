@@ -1,4 +1,4 @@
-const CACHE_NAME = "unach-shell-v8";
+const CACHE_NAME = "unach-shell-v9";
 const APP_SHELL = ["/", "/app.css", "/app.js", "/manifest.webmanifest", "/icon.svg", "/growth-bg.jpg"];
 
 self.addEventListener("install", (event) => {
