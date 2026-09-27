@@ -36,7 +36,6 @@ const state = {
   detailFilterDirty: false,
   currentView: "overview",
   adminTab: "users",
-  maintenanceReturn: null,
   importPreview: null,
 };
 
@@ -253,9 +252,6 @@ function applyPeriodPreset(prefix, preset) {
 
 async function showApp(user, metadata) {
   state.user = user;
-  $("#superuser-tab").hidden = user.role !== "treasurer";
-  $("#superuser-tab").textContent = user.is_superuser ? "Mantenimiento" : "Revisar registros";
-  state.maintenanceReturn = null;
   state.departments = metadata.departments || [];
   state.dateRange = metadata.dateRange;
   state.selectedDepartment = user.role === "department" ? user.department_name : null;
@@ -529,7 +525,7 @@ async function loadGlobalSearch(append = false) {
     if (!pageData.transactions.length) {
       list.innerHTML = '<div class="transaction-empty">Sin coincidencias para este período.</div>';
     } else {
-      const markup = pageData.transactions.map(transactionRowHTML).join("");
+      const markup = pageData.transactions.map((row) => transactionRowHTML(row, false)).join("");
       if (append) list.insertAdjacentHTML("beforeend", markup);
       else list.innerHTML = markup;
     }
@@ -647,7 +643,7 @@ function renderTransactions(pageData, append = false) {
   else container.innerHTML = markup;
 }
 
-function transactionRowHTML(row) {
+function transactionRowHTML(row, allowReview = true) {
   const dateLine = '<div class="transaction-date">' + shortDate(row.movement_date) +
     '<small>Contable</small><small>Evento ' + shortDate(row.event_date) + '</small></div>';
   const donor = row.donor_name ? '<div class="transaction-donor">' + escapeHTML(row.donor_name) + '</div>' : '<div class="transaction-donor">Aportante no informado</div>';
@@ -659,7 +655,7 @@ function transactionRowHTML(row) {
     '<div class="transaction-description">' + escapeHTML(row.description || "Sin glosa") + observations + '</div>' +
     donor +
     '<div class="transaction-amount ' + amountClass + '">' + (row.amount > 0 ? "+" : "") + money(row.amount) +
-      '<small>Saldo acumulado ' + money(row.running_balance) + '</small>' + maintenanceButton('movement', row.id) + '</div>' +
+      '<small>Saldo acumulado ' + money(row.running_balance) + '</small>' + (allowReview ? maintenanceButton('movement', row.id) : "") + '</div>' +
     '</article>';
 }
 
@@ -687,7 +683,7 @@ function renderAdminUsers() {
         '<span class="admin-secondary">' + escapeHTML(user.role === "treasurer" ? "Tesorería" : user.department_name) + '</span></div>' +
       '<div class="admin-secondary admin-created">' + shortDate(user.created_at.slice(0, 10)) + '</div>' +
       '<span class="status-pill status-' + user.status + '">' + labels[user.status] + '</span>' +
-      '<div class="admin-actions">' + (user.role === "treasurer" ? "" : actions[user.status]) + maintenanceButton('user', user.id) + '</div>' +
+      '<div class="admin-actions">' + (user.role === "treasurer" ? "" : actions[user.status]) + '</div>' +
       '<span class="admin-user-id" hidden>' + user.id + '</span>' +
     '</div>'
   ).join("") || '<div class="transaction-empty">' + (query ? "Sin coincidencias." : "Todavía no hay solicitudes.") + '</div>';
@@ -759,7 +755,7 @@ async function loadAudit(append = false) {
     const context = Object.entries(detail).map(([key, value]) => key + ": " + value).join(" · ");
     return '<div class="audit-row">' +
       '<span>' + escapeHTML(new Date(row.created_at).toLocaleString("es-CL")) + '</span>' +
-      '<span class="audit-event">' + escapeHTML(auditLabel(row.event_type)) + maintenanceButton("activity", row.id) + '</span>' +
+      '<span class="audit-event">' + escapeHTML(auditLabel(row.event_type)) + '</span>' +
       '<span>' + escapeHTML(row.email || "Sistema") + (context ? " · " + escapeHTML(context) : "") + '</span>' +
       '</div>';
     }).join("");
@@ -780,15 +776,6 @@ async function openAdminTab(tab) {
   state.adminTab = tab;
   $$(".admin-tab").forEach((button) => button.classList.toggle("is-active", button.dataset.adminTab === tab));
   $$(".admin-panel").forEach((panel) => { panel.hidden = panel.id !== "admin-" + tab + "-panel"; });
-  if (tab === "maintenance") {
-    const canDelete = Boolean(state.user?.is_superuser);
-    $("#maintenance-panel-title").textContent = canDelete ? "Mantenimiento · Superusuario" : "Revisar registros";
-    $("#maintenance-delete-controls").hidden = !canDelete;
-    $("#maintenance-readonly-note").hidden = canDelete;
-    $("#maintenance-back-detail").hidden = !state.maintenanceReturn || state.maintenanceReturn.view !== "department";
-    $$("#maintenance-kind option").forEach((option) => { option.hidden = !canDelete && option.value !== "movement"; });
-    if (!canDelete) $("#maintenance-kind").value = "movement";
-  }
   try {
     if (tab === "users") await loadAdminUsers();
     if (tab === "audit") {
@@ -1262,63 +1249,46 @@ $("#audit-export").addEventListener("click", async () => {
   finally { button.disabled = false; }
 });
 function maintenanceButton(kind, id) {
-  if (state.user?.role !== "treasurer") return "";
-  if (!state.user.is_superuser && kind !== "movement") return "";
-  return '<button class="text-button maintenance-link" type="button" data-maintenance-kind="' + kind + '" data-maintenance-id="' + Number(id) + '">Revisar #' + Number(id) + '</button>';
+  if (state.user?.role !== "treasurer" || kind !== "movement") return "";
+  return '<button class="text-button maintenance-link" type="button" data-maintenance-id="' + Number(id) + '">Revisar #' + Number(id) + '</button>';
 }
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-maintenance-id]");
   if (!button || state.user?.role !== "treasurer") return;
-  state.maintenanceReturn = {view: state.currentView === "department" ? "department" : null, department: state.selectedDepartment};
-  state.currentView = "admin"; updateNav();
-  await openAdminTab("maintenance");
   resetMaintenance();
-  $("#maintenance-kind").value = button.dataset.maintenanceKind;
-  $("#maintenance-id").value = button.dataset.maintenanceId;
-  $("#maintenance-preview").click();
+  const selection = {kind: "movement", id: Number(button.dataset.maintenanceId)};
+  $("#movement-review-panel").hidden = false;
+  try {
+    const result = await api("/api/superuser/record", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({...selection, action: "preview"})});
+    maintenanceSelection = {...selection, fingerprint: result.fingerprint};
+    renderMaintenanceRecord(result.record);
+    $("#maintenance-result").hidden = false;
+    $("#movement-review-panel").scrollIntoView({behavior: "smooth", block: "start"});
+  } catch (error) {
+    $("#movement-review-panel").hidden = true;
+    toast(error.message, "error");
+  }
 });
 let maintenanceSelection = null;
 function resetMaintenance() {
   maintenanceSelection = null;
+  $("#movement-review-panel").hidden = true;
   $("#maintenance-result").hidden = true;
   $("#maintenance-password").value = "";
 }
-for (const id of ["maintenance-kind", "maintenance-id"]) $("#" + id).addEventListener("input", resetMaintenance);
 $("#maintenance-back-detail").addEventListener("click", () => {
-  const previous = state.maintenanceReturn;
-  state.maintenanceReturn = null;
   resetMaintenance();
-  if (!previous || previous.view !== "department") {
-    state.currentView = "admin";
-    updateNav();
-    openAdminTab("maintenance");
-    return;
-  }
-  state.selectedDepartment = previous.department || null;
-  if (state.user?.role === "treasurer") $("#detail-department").value = state.selectedDepartment || "";
-  $("#department-title").textContent = state.selectedDepartment || "Todos los departamentos";
-  state.currentView = "department";
-  state.transactionPage = 1;
-  state.transactionLoaded = 0;
-  state.transactionCursor = null;
-  updateNav();
-  loadDepartmentReport();
 });
-$("#maintenance-preview").addEventListener("click", async () => {
-  resetMaintenance();
-  const selection = {kind: $("#maintenance-kind").value, id: Number($("#maintenance-id").value)};
-  try {
-    const result = await api("/api/superuser/record", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({...selection, action: "preview"})});
-    if (selection.kind !== $("#maintenance-kind").value || selection.id !== Number($("#maintenance-id").value)) return;
-    maintenanceSelection = {...selection, fingerprint: result.fingerprint};
-    const labels = {id: "ID", batch_id: "Lote", source_row: "Fila de origen", department_id: "Código de departamento", department_name: "Departamento", opening_balance: "Saldo inicial", movement_type_number: "Código de movimiento", movement_type: "Tipo", movement_date: "Fecha contable", event_date: "Fecha del evento", amount: "Importe", description: "Glosa", base_person_id: "Código de persona", server_id: "Código de servidor", donor_name: "Aportante", currency: "Moneda", total_by_currency: "Total por moneda", observations: "Observaciones", email: "Correo", role: "Rol", status: "Estado", created_at: "Creación", approved_at: "Aprobación", user_id: "ID de usuario", event_type: "Acción", detail: "Detalle"};
-    $("#maintenance-record").textContent = Object.entries(result.record).map(([key, value]) => {
-      const shown = ["amount", "opening_balance", "total_by_currency"].includes(key) && value != null ? money(value) : value ?? "—";
-      return (labels[key] || key) + ": " + shown;
-    }).join("\n");
-    $("#maintenance-result").hidden = false;
-  } catch (error) { toast(error.message, "error"); }
-});
+function renderMaintenanceRecord(record) {
+  const labels = {id: "ID", batch_id: "Lote", source_row: "Fila de origen", department_id: "Código de departamento", department_name: "Departamento", opening_balance: "Saldo inicial", movement_type_number: "Código de movimiento", movement_type: "Tipo", movement_date: "Fecha contable", event_date: "Fecha del evento", amount: "Importe", description: "Glosa", base_person_id: "Código de persona", server_id: "Código de servidor", donor_name: "Aportante", currency: "Moneda", total_by_currency: "Total por moneda", observations: "Observaciones", email: "Correo", role: "Rol", status: "Estado", created_at: "Creación", approved_at: "Aprobación", user_id: "ID de usuario", event_type: "Acción", detail: "Detalle"};
+  $("#maintenance-record").textContent = Object.entries(record).map(([key, value]) => {
+    const shown = ["amount", "opening_balance", "total_by_currency"].includes(key) && value != null ? money(value) : value ?? "—";
+    return (labels[key] || key) + ": " + shown;
+  }).join("\n");
+  const canDelete = Boolean(state.user?.is_superuser);
+  $("#maintenance-delete-controls").hidden = !canDelete;
+  $("#maintenance-readonly-note").hidden = canDelete;
+}
 $("#maintenance-delete").addEventListener("click", async () => {
   if (!maintenanceSelection || !window.confirm("¿Eliminar permanentemente el registro revisado?")) return;
   const button = $("#maintenance-delete"); button.disabled = true;
