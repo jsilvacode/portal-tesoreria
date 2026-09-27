@@ -23,7 +23,7 @@ try:
     if not row:
         raise SystemExit('Registra primero la cuenta en el portal, definiendo allí su contraseña.')
     if args.activate:
-        conn.execute("UPDATE users SET status = 'active', approved_at = ? WHERE id = ?", (app.utc_now(), row['id']))
+        conn.execute("UPDATE users SET status = 'active', role = 'treasurer', department_name = NULL, approved_at = ? WHERE id = ?", (app.utc_now(), row['id']))
         app.record_audit(conn, row['id'], 'owner_account_activated', {'source': 'server_configuration'})
         conn.commit()
     print('Cuenta:', row['email'])

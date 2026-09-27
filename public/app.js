@@ -1041,8 +1041,9 @@ $("#login-form").addEventListener("submit", async (event) => {
 
 $("#register-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
-  const button = event.currentTarget.querySelector("button[type=submit]");
+  const formElement = event.currentTarget;
+  const form = new FormData(formElement);
+  const button = formElement.querySelector("button[type=submit]");
   button.disabled = true;
   try {
     const result = await api("/api/register", {
@@ -1054,7 +1055,7 @@ $("#register-form").addEventListener("submit", async (event) => {
         department: form.get("department"),
       }),
     });
-    event.currentTarget.reset();
+    formElement.reset();
     setAuthMode("login");
     toast(result.message, "success");
   } catch (error) {
