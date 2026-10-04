@@ -632,9 +632,13 @@ def effective_user(user: dict) -> dict:
     user = dict(user)
     user["is_superuser"] = user["id"] == superuser_id() and user["status"] == "active"
     if user["is_superuser"]:
-        user["role"] = "treasurer"
+        user["role"] = "superuser"
         user["department_name"] = None
     return user
+
+
+def has_admin_access(user: dict) -> bool:
+    return user["role"] == "treasurer" or bool(user.get("is_superuser"))
 
 
 def session_metadata(conn, user: dict | None) -> dict:
@@ -1013,7 +1017,7 @@ def intervals_sql(column: str, intervals: list[tuple[str, str]]) -> tuple[str, l
 
 
 def resolve_summary_department(user: dict, requested: str | None, view: str) -> str | None:
-    if user["role"] == "treasurer":
+    if has_admin_access(user):
         return requested
     own_department = user["department_name"]
     if view == "department":
@@ -1758,7 +1762,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
 
     def require_treasurer(self, conn: sqlite3.Connection) -> dict | None:
         user = self.require_user(conn)
-        if user and user["role"] != "treasurer":
+        if user and not has_admin_access(user):
             self.send_json(HTTPStatus.FORBIDDEN, {"error": "Esta acción requiere acceso de tesorería."})
             return None
         return user
@@ -2157,7 +2161,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         actor = self.require_user(conn)
         if not actor:
             return
-        if actor["role"] != "treasurer":
+        if not has_admin_access(actor):
             self.send_json(403, {"error": "Esta acción requiere acceso autorizado."})
             return
         payload = self.parse_json_body()
@@ -2565,7 +2569,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             scope = requested
         summary = get_summary(conn, start, end, scope, year, months)
         include_detail = view == "department" or (
-            user["role"] == "treasurer" and view == "all_detail"
+            has_admin_access(user) and view == "all_detail"
         )
         search = ((query.get("q") or [""])[0] or "").strip()[:120]
         if search and not include_detail:

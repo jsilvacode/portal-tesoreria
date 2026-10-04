@@ -72,6 +72,14 @@ function renderUserIdentity(user) {
     '<span class="user-department">' + escapeHTML(department) + '</span>';
 }
 
+function hasAdminAccess(user) {
+  return Boolean(user?.is_superuser || user?.role === "treasurer");
+}
+
+function userDepartmentLabel(user) {
+  return user.is_superuser ? "Superusuario" : hasAdminAccess(user) ? "Tesorería" : user.department_name;
+}
+
 function matchesSearch(values, query) {
   const normalized = normalizedSearch(query);
   if (!normalized) return true;
@@ -287,15 +295,15 @@ async function showApp(user, metadata) {
   $("#auth-screen").hidden = true;
   $("#app-shell").hidden = false;
   renderUserIdentity(user);
-  $("#department-nav-label").textContent = user.role === "treasurer" ? "Detalle" : "Mi departamento";
-  $$(".admin-nav").forEach((item) => { item.hidden = user.role !== "treasurer"; });
-  $("#global-department-filter").hidden = user.role !== "treasurer";
-  $("#detail-department-filter").hidden = user.role !== "treasurer";
-  $("#global-filter-fields").classList.toggle("has-department-filter", user.role === "treasurer");
-  $("#detail-filter-fields").classList.toggle("has-department-filter", user.role === "treasurer");
+  $("#department-nav-label").textContent = hasAdminAccess(user) ? "Detalle" : "Mi departamento";
+  $$(".admin-nav").forEach((item) => { item.hidden = !hasAdminAccess(user); });
+  $("#global-department-filter").hidden = !hasAdminAccess(user);
+  $("#detail-department-filter").hidden = !hasAdminAccess(user);
+  $("#global-filter-fields").classList.toggle("has-department-filter", hasAdminAccess(user));
+  $("#detail-filter-fields").classList.toggle("has-department-filter", hasAdminAccess(user));
   populateDepartmentOptions(state.departments);
   initializePeriodControls(metadata.dateRange || {});
-  $("#department-title").textContent = user.role === "treasurer" ? "Detalle de movimientos" : user.department_name;
+  $("#department-title").textContent = hasAdminAccess(user) ? "Detalle de movimientos" : user.department_name;
   state.currentView = "overview";
   updateNav();
   return loadGlobalReport();
@@ -443,7 +451,7 @@ function compactMoney(value) {
 
 function renderDepartmentRows(report) {
   const tbody = $("#department-rows");
-  const isTreasurer = state.user.role === "treasurer";
+  const isTreasurer = hasAdminAccess(state.user);
   const search = $("#global-search").value.trim();
   const rows = report.departments.filter((row) => matchesSearch([
     row.department, row.currency, row.opening, Math.trunc(row.opening / 100), money(row.opening),
@@ -479,7 +487,7 @@ function renderDepartmentRows(report) {
 async function loadGlobalReport() {
   const period = periodQuery("global");
   if (period === null) return false;
-  const department = state.user.role === "treasurer" ? $("#global-department").value : "";
+  const department = hasAdminAccess(state.user) ? $("#global-department").value : "";
   const queryKey = period + "&department=" + department;
   if (state.globalReport && state.globalQueryKey === queryKey) return true;
   if (state.globalReportController) state.globalReportController.abort();
@@ -530,7 +538,7 @@ async function loadGlobalSearch(append = false) {
   const controller = new AbortController();
   state.globalSearchController = controller;
   const requestId = ++state.globalSearchRequest;
-  const department = state.user.role === "treasurer" ? $("#global-department").value : "";
+  const department = hasAdminAccess(state.user) ? $("#global-department").value : "";
   const params = new URLSearchParams(period);
   params.set("q", search);
   params.set("page", append ? state.globalSearchPage + 1 : 1);
@@ -582,7 +590,7 @@ function openDepartment(name) {
     return;
   }
   state.selectedDepartment = name;
-  if (state.user.role === "treasurer") $("#detail-department").value = name || "";
+  if (hasAdminAccess(state.user)) $("#detail-department").value = name || "";
   syncPeriodControls();
   $("#department-title").textContent = name || "Todos los departamentos";
   state.currentView = "department";
@@ -710,7 +718,7 @@ async function loadAdminUsers() {
 function renderAdminUsers() {
   const query = $("#users-search").value;
   const users = state.users.filter((user) => matchesSearch([
-    user.full_name, user.email, user.role === "treasurer" ? "Tesorería" : user.department_name,
+    user.full_name, user.email, userDepartmentLabel(user),
     user.status, user.created_at, shortDate(user.created_at.slice(0, 10)),
   ], query));
   const labels = { pending: "Pendiente", active: "Activo", inactive: "Desactivado" };
@@ -723,10 +731,10 @@ function renderAdminUsers() {
     '<div class="admin-row">' +
       '<div class="admin-primary">' + escapeHTML(user.email) +
         (user.full_name ? '<span class="admin-secondary">' + escapeHTML(user.full_name) + '</span>' : '') +
-        '<span class="admin-secondary">' + escapeHTML(user.role === "treasurer" ? "Tesorería" : user.department_name) + '</span></div>' +
+        '<span class="admin-secondary">' + escapeHTML(userDepartmentLabel(user)) + '</span></div>' +
       '<div class="admin-secondary admin-created">' + shortDate(user.created_at.slice(0, 10)) + '</div>' +
       '<span class="status-pill status-' + user.status + '">' + labels[user.status] + '</span>' +
-      '<div class="admin-actions">' + (user.role === "treasurer" ? "" : actions[user.status]) + '</div>' +
+      '<div class="admin-actions">' + (hasAdminAccess(user) ? "" : actions[user.status]) + '</div>' +
       '<span class="admin-user-id" hidden>' + user.id + '</span>' +
     '</div>'
   ).join("") || '<div class="transaction-empty">' + (query ? "Sin coincidencias." : "Todavía no hay solicitudes.") + '</div>';
@@ -848,9 +856,9 @@ function exportReport(format, view) {
   params.set("format", format);
   params.set("view", view);
   const department = view === "department" ? getDetailScope() :
-    (view === "global" && state.user.role === "treasurer" ? $("#global-department").value : null);
+    (view === "global" && hasAdminAccess(state.user) ? $("#global-department").value : null);
   if (department) params.set("department", department);
-  if (view === "all_detail" && state.user.role !== "treasurer") {
+  if (view === "all_detail" && !hasAdminAccess(state.user)) {
     toast("La exportación detallada global requiere acceso de tesorería.", "error");
     return;
   }
@@ -1174,7 +1182,7 @@ $$(".nav-item").forEach((button) => button.addEventListener("click", () => {
   if (view === "overview") loadGlobalReport();
   if (view === "department") {
     if (state.user.role === "department") state.selectedDepartment = state.user.department_name;
-    if (state.user.role === "treasurer") state.selectedDepartment = $("#detail-department").value || null;
+    if (hasAdminAccess(state.user)) state.selectedDepartment = $("#detail-department").value || null;
     $("#department-title").textContent = state.selectedDepartment || "Todos los departamentos";
     state.transactionPage = 1;
     state.transactionLoaded = 0;
@@ -1340,12 +1348,12 @@ $("#audit-export").addEventListener("click", async () => {
   finally { button.disabled = false; }
 });
 function maintenanceButton(kind, id) {
-  if (state.user?.role !== "treasurer" || kind !== "movement") return "";
+  if (!hasAdminAccess(state.user) || kind !== "movement") return "";
   return '<button class="text-button maintenance-link" type="button" data-maintenance-id="' + Number(id) + '">Revisar #' + Number(id) + '</button>';
 }
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-maintenance-id]");
-  if (!button || state.user?.role !== "treasurer") return;
+  if (!button || !hasAdminAccess(state.user)) return;
   resetMaintenance(false);
   maintenanceReturnFocus = button;
   const selection = {kind: "movement", id: Number(button.dataset.maintenanceId)};

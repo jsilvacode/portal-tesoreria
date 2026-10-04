@@ -55,3 +55,14 @@ test('browser name normalization preserves accents, hyphens and apostrophes', ()
   assert.equal(context.normalizePersonName(' marÍA-josÉ  o’CONNOR '), 'María-José O’Connor');
   assert.equal(context.normalizePersonName('jose\u0301 pérez'), 'José Pérez');
 });
+
+test('superuser has administrative access while retaining its distinct role', () => {
+  const context = {};
+  vm.runInNewContext(identityFunctions, context);
+  assert.equal(context.hasAdminAccess({role: 'superuser', is_superuser: true}), true);
+  assert.equal(context.userDepartmentLabel({role: 'superuser', is_superuser: true}), 'Superusuario');
+  assert.equal(context.hasAdminAccess({role: 'treasurer'}), true);
+  assert.equal(context.userDepartmentLabel({role: 'treasurer'}), 'Tesorería');
+  assert.equal(context.hasAdminAccess({role: 'department'}), false);
+  assert.equal(context.hasAdminAccess(null), false);
+});

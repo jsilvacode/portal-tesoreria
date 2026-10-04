@@ -135,6 +135,34 @@ class TreasuryTests(unittest.TestCase):
             "SELECT id FROM users WHERE email = ?", ("missing@example.test",)
         ).fetchone())
 
+    def test_superuser_session_uses_distinct_role_and_keeps_admin_access(self):
+        request = AuthRequestHandler({"email": "tesorero@example.test", "password": "synthetic"})
+        with patch.dict(app.os.environ, {"UNACH_SUPERUSER_ID": "1"}), patch("app.verify_password", return_value=True):
+            request.handle_login(self.conn)
+            self.assertEqual(request.response[1]["user"]["role"], "superuser")
+            request.headers["Cookie"] = request.cookie.split(";", 1)[0]
+            root = request.current_user(self.conn)
+            self.assertEqual(root["role"], "superuser")
+            self.assertTrue(root["is_superuser"])
+            self.assertEqual(app.TreasuryHandler.require_treasurer(request, self.conn)["id"], 1)
+
+    def test_treasurer_user_list_keeps_root_hidden(self):
+        self.conn.execute(
+            """INSERT INTO users(id, email, full_name, password_hash, role, status, created_at)
+               VALUES (2, 'root@example.test', 'Owner', 'test-only', 'treasurer', 'active', ?)""",
+            (app.utc_now(),),
+        )
+        self.conn.commit()
+        connector = app.connect
+        with patch.dict(app.os.environ, {"UNACH_SUPERUSER_ID": "2"}), patch("app.connect", side_effect=lambda: connector(self.db_path)):
+            request = AuditRequestHandler("/api/admin/users", 1)
+            request.do_GET()
+            self.assertEqual([user["id"] for user in request.response[1]["users"]], [1])
+            request._user = {"id": 2, "role": "superuser", "is_superuser": True}
+            request.do_GET()
+            root = next(user for user in request.response[1]["users"] if user["id"] == 2)
+            self.assertEqual(root["role"], "superuser")
+
     def test_postgres_numeric_balances_are_json_serializable_on_every_page(self):
         original_execute = self.conn.execute
 
@@ -270,9 +298,14 @@ class TreasuryTests(unittest.TestCase):
         user = {"id": 1, "status": "active", "email": "owner@example.test", "role": "department", "department_name": "Departamento Norte"}
         with patch.dict(app.os.environ, {"UNACH_SUPERUSER_ID": "1"}):
             self.assertTrue(app.effective_user(user)["is_superuser"])
-            self.assertEqual(app.effective_user(user)["role"], "treasurer")
+            root = app.effective_user(user)
+            self.assertEqual(root["role"], "superuser")
+            self.assertIsNone(root["department_name"])
+            self.assertTrue(app.has_admin_access(root))
+            self.assertEqual(app.resolve_summary_department(root, "Departamento Sur", "department"), "Departamento Sur")
             self.assertFalse(app.effective_user({**user, "status": "inactive"})["is_superuser"])
             self.assertFalse(app.effective_user({**user, "id": 2})["is_superuser"])
+            self.assertFalse(app.has_admin_access({"role": "superuser", "is_superuser": False}))
 
     def test_treasurer_cannot_use_destructive_endpoint(self):
         handler = CommitHandler({"kind": "movement", "id": 1, "action": "delete"}, 1)
