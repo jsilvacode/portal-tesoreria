@@ -28,6 +28,17 @@ class CommitHandler(app.TreasuryHandler):
         self.response = (status, payload)
 
 
+class AuthRequestHandler(CommitHandler):
+    def __init__(self, payload):
+        super().__init__(payload, 0)
+        self.headers = {}
+        self.cookie = None
+
+    def send_json(self, status, payload, cookie=None):
+        super().send_json(status, payload, cookie)
+        self.cookie = cookie
+
+
 class AuditRequestHandler(app.TreasuryHandler):
     def __init__(self, path, user_id):
         self.path = path
@@ -67,6 +78,63 @@ class AnonymousAdapterHandler(vercel_api.handler):
 
 
 class TreasuryTests(unittest.TestCase):
+    def test_person_name_normalization_preserves_accents_and_word_separators(self):
+        examples = {
+            "  JOSÉ   péREZ \n ñuÑEZ  ": "José Pérez Ñuñez",
+            "marÍA-josÉ o’CONNOR": "María-José O’Connor",
+            "jose\u0301 pÉREZ": "José Pérez",
+        }
+        for original, expected in examples.items():
+            with self.subTest(original=original):
+                self.assertEqual(app.normalize_person_name(original), expected)
+        for invalid in (None, [], "", " ", "A", "Juan123", "<script>", "a" * 101):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    app.normalize_person_name(invalid)
+
+    def test_registration_keeps_name_pending_until_approval_and_session_reload(self):
+        password = "synthetic-only-password"
+        request = AuthRequestHandler({
+            "name": "  JOSÉ   péREZ ", "email": "jose@example.test",
+            "password": password, "department": "Departamento Norte",
+        })
+        request.handle_register(self.conn)
+        self.assertEqual(request.response[0], 201)
+        account = dict(self.conn.execute(
+            "SELECT * FROM users WHERE email = ?", ("jose@example.test",)
+        ).fetchone())
+        self.assertEqual(account["full_name"], "José Pérez")
+        self.assertEqual(account["status"], "pending")
+        self.assertEqual(account["role"], "department")
+        self.assertTrue(app.verify_password(password, account["password_hash"]))
+        login = AuthRequestHandler({"email": account["email"], "password": password})
+        login.handle_login(self.conn)
+        self.assertEqual(login.response[0], 403)
+        self.conn.execute("UPDATE users SET status = 'active' WHERE id = ?", (account["id"],))
+        self.conn.commit()
+        login.handle_login(self.conn)
+        self.assertEqual(login.response[0], 200)
+        identity = login.response[1]["user"]
+        self.assertEqual(identity["full_name"], "José Pérez")
+        self.assertEqual(identity["email"], account["email"])
+        self.assertEqual(identity["department_name"], "Departamento Norte")
+        self.assertFalse(identity["is_superuser"])
+        login.headers["Cookie"] = login.cookie.split(";", 1)[0]
+        reloaded = login.current_user(self.conn)
+        self.assertEqual(reloaded["full_name"], identity["full_name"])
+        self.assertEqual(reloaded["role"], "department")
+
+    def test_registration_requires_name_before_creating_an_account(self):
+        request = AuthRequestHandler({
+            "email": "missing@example.test", "password": "synthetic-only-password",
+            "department": "Departamento Norte",
+        })
+        with self.assertRaises(ValueError):
+            request.handle_register(self.conn)
+        self.assertIsNone(self.conn.execute(
+            "SELECT id FROM users WHERE email = ?", ("missing@example.test",)
+        ).fetchone())
+
     def test_postgres_numeric_balances_are_json_serializable_on_every_page(self):
         original_execute = self.conn.execute
 
@@ -411,9 +479,22 @@ class TreasuryTests(unittest.TestCase):
                CREATE TABLE import_staging (
                  id INTEGER PRIMARY KEY AUTOINCREMENT, preview_token TEXT NOT NULL, record_json TEXT NOT NULL
                );
-               CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);"""
+               CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+               CREATE TABLE users (
+                 id INTEGER PRIMARY KEY, email TEXT, password_hash TEXT, role TEXT,
+                 department_name TEXT, status TEXT
+               );
+               INSERT INTO users VALUES (2, 'existing@example.test', 'same-hash',
+                 'treasurer', NULL, 'active');"""
         )
         app.apply_migrations(old)
+        app.apply_migrations(old)
+        account = dict(old.execute("SELECT * FROM users WHERE id = 2").fetchone())
+        self.assertEqual(account["full_name"], "")
+        self.assertEqual(account["password_hash"], "same-hash")
+        self.assertEqual(account["role"], "treasurer")
+        self.assertEqual(account["status"], "active")
+        self.assertEqual(old.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = 2").fetchone()[0], 1)
         columns = {row["name"] for row in old.execute("PRAGMA table_info(import_previews)")}
         self.assertTrue({"status", "result_batch_id", "completed_at"}.issubset(columns))
         indexes = {row["name"] for row in old.execute("PRAGMA index_list(import_staging)")}

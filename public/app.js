@@ -60,6 +60,18 @@ function normalizedSearch(value) {
     .toLocaleLowerCase("es-CL").replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+function normalizePersonName(value) {
+  return String(value || "").normalize("NFC").trim().replace(/\s+/g, " ")
+    .toLocaleLowerCase("es-CL").replace(/\p{L}[\p{L}\p{M}]*/gu,
+      (word) => word.charAt(0).toLocaleUpperCase("es-CL") + word.slice(1));
+}
+
+function renderUserIdentity(user) {
+  const department = user.is_superuser ? "Superusuario" : user.department_name || "Tesorería";
+  $("#user-badge").innerHTML = '<span class="user-name">' + escapeHTML(user.full_name || "Nombre no registrado") + '</span>' +
+    '<span class="user-department">' + escapeHTML(department) + '</span>';
+}
+
 function matchesSearch(values, query) {
   const normalized = normalizedSearch(query);
   if (!normalized) return true;
@@ -274,9 +286,7 @@ async function showApp(user, metadata) {
   state.selectedDepartment = user.role === "department" ? user.department_name : null;
   $("#auth-screen").hidden = true;
   $("#app-shell").hidden = false;
-  const userType = user.is_superuser ? "Superusuario" : user.role === "treasurer" ? "Tesorero" : "Usuario de departamento";
-  $("#user-badge").innerHTML = '<span class="user-email">' + escapeHTML(user.email) + '</span>' +
-    '<span class="user-role">' + escapeHTML(userType) + '</span>';
+  renderUserIdentity(user);
   $("#department-nav-label").textContent = user.role === "treasurer" ? "Detalle" : "Mi departamento";
   $$(".admin-nav").forEach((item) => { item.hidden = user.role !== "treasurer"; });
   $("#global-department-filter").hidden = user.role !== "treasurer";
@@ -700,7 +710,7 @@ async function loadAdminUsers() {
 function renderAdminUsers() {
   const query = $("#users-search").value;
   const users = state.users.filter((user) => matchesSearch([
-    user.email, user.role === "treasurer" ? "Tesorería" : user.department_name,
+    user.full_name, user.email, user.role === "treasurer" ? "Tesorería" : user.department_name,
     user.status, user.created_at, shortDate(user.created_at.slice(0, 10)),
   ], query));
   const labels = { pending: "Pendiente", active: "Activo", inactive: "Desactivado" };
@@ -712,6 +722,7 @@ function renderAdminUsers() {
   $("#users-list").innerHTML = users.map((user) =>
     '<div class="admin-row">' +
       '<div class="admin-primary">' + escapeHTML(user.email) +
+        (user.full_name ? '<span class="admin-secondary">' + escapeHTML(user.full_name) + '</span>' : '') +
         '<span class="admin-secondary">' + escapeHTML(user.role === "treasurer" ? "Tesorería" : user.department_name) + '</span></div>' +
       '<div class="admin-secondary admin-created">' + shortDate(user.created_at.slice(0, 10)) + '</div>' +
       '<span class="status-pill status-' + user.status + '">' + labels[user.status] + '</span>' +
@@ -1114,6 +1125,7 @@ $("#register-form").addEventListener("submit", async (event) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        name: normalizePersonName(form.get("name")),
         email: form.get("email"),
         password: form.get("password"),
         department: form.get("department"),
@@ -1127,6 +1139,10 @@ $("#register-form").addEventListener("submit", async (event) => {
   } finally {
     button.disabled = false;
   }
+});
+
+$("#register-name").addEventListener("blur", (event) => {
+  event.currentTarget.value = normalizePersonName(event.currentTarget.value);
 });
 
 $$("[data-show-register]").forEach((button) => button.addEventListener("click", async () => {
@@ -1397,6 +1413,14 @@ $("#audit-more").addEventListener("click", () => {
   if (state.auditCursor) loadAudit(true).catch((error) => toast(error.message, "error"));
 });
 $("#import-form").addEventListener("submit", submitImport);
+
+// Names and departments can wrap; keep the mobile navigation below the header.
+if ("ResizeObserver" in window) {
+  new ResizeObserver(([entry]) => {
+    const height = entry.target.getBoundingClientRect().height;
+    document.documentElement.style.setProperty("--topbar-height", height + "px");
+  }).observe($(".topbar"));
+}
 
 window.addEventListener("resize", () => {
   if (state.globalReport && state.currentView === "overview") {

@@ -122,6 +122,19 @@ def normalize_text(value) -> str:
     return "" if value is None else str(value).strip()
 
 
+def normalize_person_name(value) -> str:
+    if not isinstance(value, str):
+        raise ValueError("Escribe tu nombre.")
+    name = " ".join(unicodedata.normalize("NFC", value).split())
+    if len(name) < 2 or not any(char.isalpha() for char in name):
+        raise ValueError("Escribe tu nombre (al menos 2 caracteres).")
+    if len(name) > 100:
+        raise ValueError("El nombre debe tener como máximo 100 caracteres.")
+    if any(not char.isalpha() and char not in " .'-’" for char in name):
+        raise ValueError("El nombre solo puede contener letras, espacios, puntos, guiones y apóstrofes.")
+    return re.sub(r"[^\W\d_]+", lambda match: match.group().capitalize(), name)
+
+
 def normalize_search_text(value) -> str:
     decomposed = unicodedata.normalize("NFKD", str(value or "")).casefold()
     without_marks = "".join(char for char in decomposed if not unicodedata.combining(char))
@@ -451,6 +464,7 @@ def create_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            full_name TEXT NOT NULL DEFAULT '',
             password_hash TEXT NOT NULL,
             role TEXT NOT NULL CHECK(role IN ('treasurer', 'department')),
             department_name TEXT REFERENCES departments(name),
@@ -577,7 +591,22 @@ def apply_migrations(conn) -> None:
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
         (1, utc_now()),
     )
+    apply_user_name_migration(conn)
     conn.commit()
+
+
+def apply_user_name_migration(conn) -> None:
+    """Keep existing accounts intact when adding registration names."""
+    if isinstance(conn, PostgresConnection):
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT NOT NULL DEFAULT ''")
+    else:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "full_name" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN full_name TEXT NOT NULL DEFAULT ''")
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+        (2, utc_now()),
+    )
 
 
 def record_audit(
@@ -1710,7 +1739,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             return None
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         row = conn.execute(
-            """SELECT u.id, u.email, u.role, u.department_name, u.status, s.expires_at
+            """SELECT u.id, u.email, u.full_name, u.role, u.department_name, u.status, s.expires_at
                FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?""",
             (token_hash,),
         ).fetchone()
@@ -1867,7 +1896,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 user = self.require_treasurer(conn)
                 if not user:
                     return
-                user_sql = """SELECT u.id, u.email, u.role, u.department_name, u.status, u.created_at,
+                user_sql = """SELECT u.id, u.email, u.full_name, u.role, u.department_name, u.status, u.created_at,
                                      u.approved_at
                               FROM users u"""
                 user_params = []
@@ -2069,6 +2098,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             session_metadata(conn, {
                 "id": row["id"],
                 "email": row["email"],
+                "full_name": row["full_name"],
                 "role": row["role"],
                 "department_name": row["department_name"],
                 "status": row["status"],
@@ -2078,6 +2108,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
 
     def handle_register(self, conn: sqlite3.Connection):
         payload = self.parse_json_body()
+        full_name = normalize_person_name(payload.get("name"))
         email = normalize_text(payload.get("email")).lower()
         password = str(payload.get("password") or "")
         department = normalize_text(payload.get("department"))
@@ -2089,9 +2120,9 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             raise ValueError("Selecciona un departamento de la lista.")
         try:
             cursor = conn.execute(
-                """INSERT INTO users(email, password_hash, role, department_name, status, created_at)
-                   VALUES (?, ?, 'department', ?, 'pending', ?)""",
-                (email, password_hash(password), department, utc_now()),
+                """INSERT INTO users(email, full_name, password_hash, role, department_name, status, created_at)
+                   VALUES (?, ?, ?, 'department', ?, 'pending', ?)""",
+                (email, full_name, password_hash(password), department, utc_now()),
             )
         except sqlite3.IntegrityError as exc:
             raise ValueError("Ya existe una solicitud para ese correo.") from exc
