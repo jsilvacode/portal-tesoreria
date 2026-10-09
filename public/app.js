@@ -3,10 +3,13 @@ const state = {
   departments: [],
   dateRange: null,
   period: { start: "", end: "", year: "", months: [], preset: "all" },
+  reportFilters: { global: { department: "", search: "" }, detail: { department: "", search: "" } },
+  globalSearchKey: null,
   globalReport: null,
   globalQueryKey: null,
   detailReport: null,
   detailQueryKey: null,
+  detailSummaryKey: null,
   selectedDepartment: null,
   transactionPage: 1,
   transactionPages: 1,
@@ -18,8 +21,6 @@ const state = {
   transactionController: null,
   globalReportRequest: 0,
   globalReportController: null,
-  detailSearchTimer: null,
-  globalSearchTimer: null,
   globalSearchRequest: 0,
   globalSearchPage: 1,
   globalSearchPages: 1,
@@ -27,8 +28,6 @@ const state = {
   globalSearchCursor: null,
   globalSearchController: null,
   globalSearchLoading: false,
-  globalFilterTimer: null,
-  detailFilterTimer: null,
   auditSearchTimer: null,
   auditRequest: 0,
   auditController: null,
@@ -39,7 +38,6 @@ const state = {
   currentView: "overview",
   adminTab: "users",
   importPreview: null,
-  filterExpanded: { global: false, detail: false },
 };
 
 const $ = (selector, root) => (root || document).querySelector(selector);
@@ -67,7 +65,7 @@ function normalizePersonName(value) {
 }
 
 function renderUserIdentity(user) {
-  const department = user.is_superuser ? "Superusuario" : user.department_name || "Tesorería";
+  const department = userDepartmentLabel(user);
   $("#user-badge").innerHTML = '<span class="user-name">' + escapeHTML(user.full_name || "Nombre no registrado") + '</span>' +
     '<span class="user-department">' + escapeHTML(department) + '</span>';
 }
@@ -76,8 +74,13 @@ function hasAdminAccess(user) {
   return Boolean(user?.is_superuser || user?.role === "treasurer");
 }
 
+function canReviewMovements(user) {
+  return hasAdminAccess(user) || user?.role === "department";
+}
+
 function userDepartmentLabel(user) {
-  return user.is_superuser ? "Superusuario" : hasAdminAccess(user) ? "Tesorería" : user.department_name;
+  return user.is_superuser ? "Superusuario" : hasAdminAccess(user) ? "Tesorería" :
+    user.role === "leadership" ? "Pastor/Ancianos" : user.department_name;
 }
 
 function matchesSearch(values, query) {
@@ -148,7 +151,8 @@ function populateDepartmentOptions(departments) {
   $("#detail-department").innerHTML = '<option value="">Todos los departamentos</option>' + options;
   $("#global-department").innerHTML = '<option value="">Todos los departamentos</option>' + options;
   $("#audit-department").innerHTML = '<option value="">Todos los departamentos</option>' + options;
-  $("#register-department").innerHTML = '<option value="">Selecciona un departamento</option>' + options;
+  $("#register-department").innerHTML = '<option value="">Selecciona un departamento</option><option value="Pastor/Ancianos">Pastor/Ancianos</option>' + options;
+  configureReportDepartments();
 }
 
 const monthNames = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
@@ -160,80 +164,99 @@ function renderMonthOptions(prefix) {
   ).join("");
 }
 
-function setFilterExpanded(prefix, expanded) {
-  const fields = $("#" + prefix + "-filter-fields");
-  const toggle = $("[data-filter-toggle='" + prefix + "']");
-  if (!fields || !toggle) return;
-  state.filterExpanded[prefix] = Boolean(expanded);
-  fields.hidden = !state.filterExpanded[prefix];
-  toggle.setAttribute("aria-expanded", state.filterExpanded[prefix] ? "true" : "false");
-  toggle.classList.toggle("is-open", state.filterExpanded[prefix]);
-  const chevron = $(".filter-chevron", toggle);
-  if (chevron) chevron.textContent = state.filterExpanded[prefix] ? "⌃" : "⌄";
+function configureReportDepartments() {
+  if (!state.user) return;
+  if (state.user.role === "department") {
+    const name = state.user.department_name;
+    $("#detail-department").innerHTML = '<option value="' + escapeHTML(name) + '">' + escapeHTML(name) + '</option>';
+    $("#detail-department").disabled = true;
+  } else {
+    $("#detail-department").disabled = false;
+  }
+  for (const prefix of ["global", "detail"]) {
+    $("#" + prefix + "-department").value = state.reportFilters[prefix].department;
+  }
+}
+
+function selectedMonths(prefix) {
+  return $$("[data-month-option][aria-pressed='true']", $("#" + prefix + "-month-options"))
+    .map((button) => Number(button.dataset.monthOption));
+}
+
+function updateRangeLabels(prefix) {
+  const start = $("#" + prefix + "-start").value;
+  const end = $("#" + prefix + "-end").value;
+  $("#" + prefix + "-range-summary").textContent = start && end
+    ? shortDate(start) + " – " + shortDate(end) : "Seleccionar fechas";
+  const months = selectedMonths(prefix);
+  $("#" + prefix + "-month-summary").textContent = !months.length || months.length === 12
+    ? "Meses · todos" : months.length === 1 ? "Meses · " + monthNames[months[0] - 1]
+      : "Meses · " + months.length + " seleccionados";
 }
 
 function syncPeriodControls() {
-  ["global", "detail"].forEach((prefix) => {
-    $("#" + prefix + "-start").value = state.period.start || "";
-    $("#" + prefix + "-end").value = state.period.end || "";
-    $("#" + prefix + "-year").value = state.period.year || "";
-    const selected = new Set(state.period.months || []);
+  for (const prefix of ["global", "detail"]) {
+    $("#" + prefix + "-start").value = state.period.start;
+    $("#" + prefix + "-end").value = state.period.end;
+    $("#" + prefix + "-year").value = state.period.year;
+    $("#" + prefix + "-period").value = state.period.preset;
+    $("#" + prefix + "-search").value = state.reportFilters[prefix].search;
+    $("#" + prefix + "-department").value = state.reportFilters[prefix].department;
+    const selected = new Set(state.period.months);
     $$("[data-month-option]", $("#" + prefix + "-month-options")).forEach((button) => {
       button.setAttribute("aria-pressed", selected.has(Number(button.dataset.monthOption)) ? "true" : "false");
     });
-    const months = state.period.months || [];
-    const summary = months.length === 0 || months.length === 12
-      ? "Meses · todos"
-      : months.length === 1
-        ? "Meses · " + monthNames[months[0] - 1]
-        : "Meses · " + months.length + " seleccionados";
-    $("#" + prefix + "-month-summary").textContent = summary;
-    $$('[data-period-view="' + prefix + '"]').forEach((button) => {
-      button.classList.toggle("is-active", state.period.preset === button.dataset.periodPreset);
-    });
-  });
+    updateRangeLabels(prefix);
+    $("#" + prefix + "-range-selector").open = false;
+  }
+}
+
+function populateYearOptions(range) {
+  const currentYear = new Date().getFullYear();
+  const available = range?.years || [];
+  const years = new Set([currentYear, ...available.map(Number)]);
+  if (!available.length && range?.start && range?.end) {
+    for (let year = Number(range.start.slice(0, 4)); year <= Number(range.end.slice(0, 4)); year++) years.add(year);
+  }
+  const options = [...years].sort((a, b) => b - a).map((year) => '<option value="' + year + '">' + year + '</option>').join("");
+  for (const prefix of ["global", "detail"]) {
+    $("#" + prefix + "-year").innerHTML = options + '<option value="">Todos los años</option>';
+  }
+}
+
+function presetDates(year, preset) {
+  const today = isoDate(new Date());
+  let start = year ? year + "-01-01" : state.dateRange?.start || today.slice(0, 4) + "-01-01";
+  let end = year ? year + "-12-31" : state.dateRange?.end || today;
+  const availableStart = state.dateRange?.start;
+  const availableEnd = state.dateRange?.end;
+  if (availableStart && availableEnd && availableStart <= end && availableEnd >= start) {
+    start = start > availableStart ? start : availableStart;
+    end = end < availableEnd ? end : availableEnd;
+  } else if (year === today.slice(0, 4)) {
+    end = today;
+  }
+  if (["30", "60", "90"].includes(preset)) {
+    const anchor = new Date(end + "T12:00:00");
+    anchor.setDate(anchor.getDate() - (Number(preset) - 1));
+    const recentStart = isoDate(anchor);
+    if (recentStart > start) start = recentStart;
+  }
+  return { start, end };
 }
 
 function initializePeriodControls(range) {
-  const start = range && range.start ? range.start : "";
-  const end = range && range.end ? range.end : "";
-  const firstYear = start ? Number(start.slice(0, 4)) : (new Date()).getFullYear();
-  const lastYear = end ? Number(end.slice(0, 4)) : firstYear;
-  const years = [];
-  for (let year = lastYear; year >= firstYear; year -= 1) years.push(year);
-  ["global", "detail"].forEach((prefix) => {
-    const options = years.map((year) => '<option value="' + year + '">' + year + '</option>').join("");
-    $("#" + prefix + "-year").innerHTML = '<option value="">Todos</option>' + options;
-    renderMonthOptions(prefix);
-  });
-  state.period = { start, end, year: "", months: [], preset: "all" };
-  setFilterExpanded("global", false);
-  setFilterExpanded("detail", false);
+  populateYearOptions(range);
+  for (const prefix of ["global", "detail"]) renderMonthOptions(prefix);
+  const year = String(new Date().getFullYear());
+  state.period = { ...presetDates(year, "all"), year, months: [], preset: "all" };
   syncPeriodControls();
 }
 
 function refreshPeriodRange(range) {
-  const previous = state.dateRange || {};
-  const wasAll = (!state.period.start || state.period.start === previous.start) &&
-    (!state.period.end || state.period.end === previous.end);
   state.dateRange = range || null;
-  const firstYear = range && range.start ? Number(range.start.slice(0, 4)) : (new Date()).getFullYear();
-  const lastYear = range && range.end ? Number(range.end.slice(0, 4)) : firstYear;
-  const options = ['<option value="">Todos</option>'];
-  for (let year = lastYear; year >= firstYear; year -= 1) {
-    options.push('<option value="' + year + '">' + year + '</option>');
-  }
-  ["global", "detail"].forEach((prefix) => {
-    const select = $("#" + prefix + "-year");
-    const selected = state.period.year;
-    select.innerHTML = options.join("");
-    if (Array.from(select.options).some((option) => option.value === selected)) select.value = selected;
-  });
-  if (wasAll) {
-    state.period.start = range && range.start || "";
-    state.period.end = range && range.end || "";
-    state.period.preset = "all";
-  }
+  populateYearOptions(range);
+  if (state.period.preset !== "custom") Object.assign(state.period, presetDates(state.period.year, state.period.preset));
   syncPeriodControls();
 }
 
@@ -244,47 +267,47 @@ function readPeriodControls(prefix) {
     toast("La fecha inicial debe ser anterior a la fecha final.", "error");
     return null;
   }
-  const months = $$("[data-month-option][aria-pressed='true']", $("#" + prefix + "-month-options"))
-    .map((button) => Number(button.dataset.monthOption));
-  state.period = {
-    start,
-    end,
-    year: $("#" + prefix + "-year").value,
-    months,
-    preset: state.period.preset || "custom",
-  };
-  syncPeriodControls();
-  return state.period;
+  return { start, end, year: $("#" + prefix + "-year").value,
+    months: selectedMonths(prefix), preset: $("#" + prefix + "-period").value };
 }
 
 function isoDate(dateValue) {
   return [dateValue.getFullYear(), String(dateValue.getMonth() + 1).padStart(2, "0"), String(dateValue.getDate()).padStart(2, "0")].join("-");
 }
 
-function applyPeriodPreset(prefix, preset) {
-  const availableStart = state.dateRange && state.dateRange.start ? state.dateRange.start : isoDate(new Date());
-  const availableEnd = state.dateRange && state.dateRange.end ? state.dateRange.end : isoDate(new Date());
-  let start = availableStart;
-  let end = availableEnd;
-  let year = "";
-  let months = [];
-  const anchor = new Date(availableEnd + "T12:00:00");
-  if (["30", "60", "90"].includes(preset)) {
-    anchor.setDate(anchor.getDate() - (Number(preset) - 1));
-    start = isoDate(anchor);
-  } else if (preset === "year") {
-    const currentYear = String((new Date()).getFullYear());
-    year = Array.from($("#" + prefix + "-year").options).some((option) => option.value === currentYear)
-      ? currentYear : String(availableEnd.slice(0, 4));
-    start = year + "-01-01";
-    end = year + "-12-31";
-    if (availableStart && availableStart > start) start = availableStart;
-    if (availableEnd && availableEnd < end) end = availableEnd;
-  }
-  state.period = { start, end, year, months, preset };
+function applyPeriodPreset(prefix) {
+  const preset = $("#" + prefix + "-period").value;
+  if (preset === "custom") return;
+  const range = presetDates($("#" + prefix + "-year").value, preset);
+  $("#" + prefix + "-start").value = range.start;
+  $("#" + prefix + "-end").value = range.end;
+  $$("[data-month-option]", $("#" + prefix + "-month-options")).forEach((button) => button.setAttribute("aria-pressed", "false"));
+  updateRangeLabels(prefix);
+}
+
+async function applyReportFilters(prefix) {
+  const period = readPeriodControls(prefix);
+  if (!period) return;
+  const previous = periodQuery();
+  state.period = period;
+  state.reportFilters[prefix] = { department: $("#" + prefix + "-department").value,
+    search: $("#" + prefix + "-search").value.trim() };
+  if (prefix === "detail") state.selectedDepartment = state.reportFilters.detail.department || null;
+  if (previous !== periodQuery()) state.detailFilterDirty = true;
   syncPeriodControls();
-  if (prefix === "global") loadGlobalReport();
-  else loadDepartmentReport();
+  const button = $("#" + prefix + "-filter-button");
+  button.disabled = true;
+  button.textContent = "Filtrando…";
+  try {
+    if (prefix === "global") await loadGlobalReport();
+    else {
+      $("#department-title").textContent = getDetailScope() || "Todos los departamentos";
+      await loadDepartmentReport();
+    }
+  } finally {
+    button.disabled = false;
+    button.textContent = "Filtrar";
+  }
 }
 
 async function showApp(user, metadata) {
@@ -292,15 +315,14 @@ async function showApp(user, metadata) {
   state.departments = metadata.departments || [];
   state.dateRange = metadata.dateRange;
   state.selectedDepartment = user.role === "department" ? user.department_name : null;
+  state.reportFilters = { global: { department: "", search: "" }, detail: { department: state.selectedDepartment || "", search: "" } };
   $("#auth-screen").hidden = true;
   $("#app-shell").hidden = false;
   renderUserIdentity(user);
   $("#department-nav-label").textContent = hasAdminAccess(user) ? "Detalle" : "Mi departamento";
   $$(".admin-nav").forEach((item) => { item.hidden = !hasAdminAccess(user); });
-  $("#global-department-filter").hidden = !hasAdminAccess(user);
-  $("#detail-department-filter").hidden = !hasAdminAccess(user);
-  $("#global-filter-fields").classList.toggle("has-department-filter", hasAdminAccess(user));
-  $("#detail-filter-fields").classList.toggle("has-department-filter", hasAdminAccess(user));
+  $(".nav-item[data-view='department']").hidden = user.role === "leadership";
+  $("#global-search").placeholder = user.role === "leadership" ? "Departamento o monto" : "Departamento, persona, monto o fecha";
   populateDepartmentOptions(state.departments);
   initializePeriodControls(metadata.dateRange || {});
   $("#department-title").textContent = hasAdminAccess(user) ? "Detalle de movimientos" : user.department_name;
@@ -311,15 +333,19 @@ async function showApp(user, metadata) {
 
 function showAuth() {
   resetMaintenance();
+  closeUserDeleteDialog();
   if (state.globalReportController) state.globalReportController.abort();
   if (state.globalSearchController) state.globalSearchController.abort();
   if (state.transactionController) state.transactionController.abort();
+  if (state.auditController) state.auditController.abort();
+  state.auditRequest++;
   state.globalReportRequest += 1;
   state.globalSearchRequest += 1;
   state.transactionRequest += 1;
   state.user = null;
   state.globalReport = null;
   state.globalQueryKey = null;
+  state.globalSearchKey = null;
   state.detailReport = null;
   state.detailQueryKey = null;
   state.users = [];
@@ -337,10 +363,9 @@ function updateNav() {
   });
 }
 
-function periodQuery(prefix) {
-  const period = readPeriodControls(prefix);
-  if (!period) return null;
+function periodQuery() {
   const params = new URLSearchParams();
+  const period = state.period;
   if (period.start) params.set("start", period.start);
   if (period.end) params.set("end", period.end);
   if (period.year) params.set("year", period.year);
@@ -452,20 +477,20 @@ function compactMoney(value) {
 function renderDepartmentRows(report) {
   const tbody = $("#department-rows");
   const isTreasurer = hasAdminAccess(state.user);
-  const search = $("#global-search").value.trim();
+  const search = state.reportFilters.global.search;
   const rows = report.departments.filter((row) => matchesSearch([
     row.department, row.currency, row.opening, Math.trunc(row.opening / 100), money(row.opening),
     row.inflow, Math.trunc(row.inflow / 100), money(row.inflow), row.outflow, Math.trunc(row.outflow / 100), money(row.outflow),
     row.net, Math.trunc(row.net / 100), money(row.net), row.closing, Math.trunc(row.closing / 100), money(row.closing), row.rows,
     report.period.start, shortDate(report.period.start), report.period.end, shortDate(report.period.end),
   ], search));
-  const focusedSearch = Boolean(search && !rows.length);
+  const focusedSearch = Boolean(search && !rows.length && canSearchGlobalMovements());
   $("#global-metrics").hidden = focusedSearch;
   $(".insight-grid").hidden = focusedSearch;
   $("#department-panel").hidden = focusedSearch;
   $("#department-count").textContent = rows.length + (rows.length === 1 ? " departamento" : " departamentos");
   tbody.innerHTML = rows.map((row) => {
-    const canOpen = isTreasurer || row.department === state.user.department_name;
+    const canOpen = isTreasurer || (state.user.role === "department" && row.department === state.user.department_name);
     const departmentCell = canOpen
       ? '<button class="dept-link" data-open-department="' + escapeHTML(row.department) + '">' + escapeHTML(row.department) + '</button>'
       : escapeHTML(row.department);
@@ -487,11 +512,15 @@ function renderDepartmentRows(report) {
 async function loadGlobalReport() {
   const period = periodQuery("global");
   if (period === null) return false;
-  const department = hasAdminAccess(state.user) ? $("#global-department").value : "";
+  const department = state.reportFilters.global.department;
   const queryKey = period + "&department=" + department;
-  if (state.globalReport && state.globalQueryKey === queryKey) return true;
+  if (state.globalReport && state.globalQueryKey === queryKey) {
+    renderDepartmentRows(state.globalReport);
+    await loadGlobalSearch();
+    return true;
+  }
   if (state.globalReportController) state.globalReportController.abort();
-  if ($("#global-search").value.trim()) {
+  if (state.reportFilters.global.search && canSearchGlobalMovements()) {
     if (state.globalSearchController) state.globalSearchController.abort();
     state.globalSearchRequest += 1;
     state.globalSearchCursor = null;
@@ -516,7 +545,7 @@ async function loadGlobalReport() {
     updateBalanceNote(report);
     renderChart($("#global-chart"), report.monthly);
     renderDepartmentRows(report);
-    if ($("#global-search").value.trim()) loadGlobalSearch();
+    await loadGlobalSearch();
     return true;
   } catch (error) {
     if (requestId !== state.globalReportRequest) return;
@@ -526,10 +555,24 @@ async function loadGlobalReport() {
   }
 }
 
+function canSearchGlobalMovements() {
+  if (!canReviewMovements(state.user)) return false;
+  const department = state.reportFilters.global.department;
+  return hasAdminAccess(state.user) || !department || department === state.user.department_name;
+}
+
 async function loadGlobalSearch(append = false) {
-  const search = $("#global-search").value.trim();
-  if (!search) {
+  const search = state.reportFilters.global.search;
+  if (!search || !canSearchGlobalMovements()) {
+    if (state.globalSearchController) state.globalSearchController.abort();
+    state.globalSearchRequest++;
+    state.globalSearchKey = null;
     $("#global-search-panel").hidden = true;
+    return;
+  }
+  const searchKey = periodQuery() + "&department=" + state.reportFilters.global.department + "&q=" + search;
+  if (!append && state.globalSearchKey === searchKey) {
+    $("#global-search-panel").hidden = false;
     return;
   }
   const period = periodQuery("global");
@@ -538,7 +581,7 @@ async function loadGlobalSearch(append = false) {
   const controller = new AbortController();
   state.globalSearchController = controller;
   const requestId = ++state.globalSearchRequest;
-  const department = hasAdminAccess(state.user) ? $("#global-department").value : "";
+  const department = state.reportFilters.global.department;
   const params = new URLSearchParams(period);
   params.set("q", search);
   params.set("page", append ? state.globalSearchPage + 1 : 1);
@@ -556,6 +599,7 @@ async function loadGlobalSearch(append = false) {
   try {
     const pageData = await api("/api/transactions?" + params.toString(), { signal: controller.signal });
     if (requestId !== state.globalSearchRequest) return;
+    state.globalSearchKey = searchKey;
     state.globalSearchPage = pageData.page;
     state.globalSearchPages = pageData.pages;
     state.globalSearchCursor = pageData.nextCursor;
@@ -573,7 +617,10 @@ async function loadGlobalSearch(append = false) {
       else list.innerHTML = markup;
     }
   } catch (error) {
-    if (requestId === state.globalSearchRequest && error.name !== "AbortError") toast(error.message, "error");
+    if (requestId === state.globalSearchRequest && error.name !== "AbortError") {
+      if (!append) $("#global-search-list").innerHTML = '<div class="transaction-empty">No se pudo consultar. Pulsa Filtrar para reintentar.</div>';
+      toast(error.message, "error");
+    }
   } finally {
     if (requestId === state.globalSearchRequest) {
       state.globalSearchLoading = false;
@@ -584,19 +631,16 @@ async function loadGlobalSearch(append = false) {
 }
 
 function openDepartment(name) {
-  if (!readPeriodControls(state.currentView === "overview" ? "global" : "detail")) return;
+  if (!canReviewMovements(state.user)) return;
   if (state.user.role === "department" && name !== state.user.department_name) {
     toast("Tu cuenta solo tiene acceso al departamento asignado.", "error");
     return;
   }
   state.selectedDepartment = name;
-  if (hasAdminAccess(state.user)) $("#detail-department").value = name || "";
+  state.reportFilters.detail.department = name || "";
   syncPeriodControls();
   $("#department-title").textContent = name || "Todos los departamentos";
   state.currentView = "department";
-  state.transactionPage = 1;
-  state.transactionLoaded = 0;
-  state.transactionCursor = null;
   updateNav();
   loadDepartmentReport();
 }
@@ -612,14 +656,14 @@ function detailQuery() {
   return period + "&view=department" + (department ? "&department=" + encodeURIComponent(department) : "");
 }
 
-async function loadDepartmentReport(append = false, refreshSummary = true) {
-  if (append && state.detailFilterDirty) return;
+async function loadDepartmentReport(append = false) {
+  if (!canReviewMovements(state.user) || (append && state.detailFilterDirty)) return;
   const query = detailQuery();
   if (query === null) return;
-  const search = $("#detail-search").value.trim();
+  const search = state.reportFilters.detail.search;
   const queryKey = query + "&q=" + encodeURIComponent(search);
-  if (!append && !state.detailFilterDirty && state.detailReport && state.detailQueryKey === queryKey && state.transactionLoaded) return;
-  const shouldRefreshSummary = refreshSummary || state.detailFilterDirty || !state.detailReport;
+  if (!append && !state.detailFilterDirty && state.detailReport && state.detailQueryKey === queryKey) return;
+  const shouldRefreshSummary = !state.detailReport || state.detailSummaryKey !== query;
   if (state.transactionController) state.transactionController.abort();
   const controller = new AbortController();
   state.transactionController = controller;
@@ -650,12 +694,13 @@ async function loadDepartmentReport(append = false, refreshSummary = true) {
       report = combined.report;
       pageData = combined;
     } else {
-      report = shouldRefreshSummary ? await api("/api/summary?" + query, { signal: controller.signal }) : state.detailReport;
+      report = state.detailReport;
       pageData = await api("/api/transactions?" + transactionParams.toString(), { signal: controller.signal });
     }
     if (requestId !== state.transactionRequest) return;
     state.detailReport = report;
     state.detailQueryKey = queryKey;
+    state.detailSummaryKey = query;
     state.transactionPage = pageData.page;
     state.transactionPages = pageData.pages;
     state.transactionTotal = pageData.total;
@@ -677,7 +722,7 @@ async function loadDepartmentReport(append = false, refreshSummary = true) {
 }
 
 function renderTransactions(pageData, append = false) {
-  const search = $("#detail-search").value.trim();
+  const search = state.reportFilters.detail.search;
   $("#transaction-count").textContent = pageData.total.toLocaleString("es-CL") + (search ? " coincidencias" : " movimientos");
   const loaded = state.transactionLoaded;
   $("#page-label").textContent = loaded.toLocaleString("es-CL") + " de " + pageData.total.toLocaleString("es-CL") + " movimientos";
@@ -688,7 +733,7 @@ function renderTransactions(pageData, append = false) {
     if (!append) container.innerHTML = '<div class="transaction-empty">' + (search ? "Sin coincidencias para la búsqueda." : "No hay movimientos para este período.") + '</div>';
     return;
   }
-  const markup = pageData.transactions.map(transactionRowHTML).join("");
+  const markup = pageData.transactions.map((row) => transactionRowHTML(row)).join("");
   if (append) container.insertAdjacentHTML("beforeend", markup);
   else container.innerHTML = markup;
 }
@@ -718,43 +763,99 @@ async function loadAdminUsers() {
 function renderAdminUsers() {
   const query = $("#users-search").value;
   const users = state.users.filter((user) => matchesSearch([
-    user.full_name, user.email, userDepartmentLabel(user),
-    user.status, user.created_at, shortDate(user.created_at.slice(0, 10)),
+    user.full_name, user.email, userDepartmentLabel(user), user.status,
+    user.created_at, shortDate(user.created_at.slice(0, 10)),
   ], query));
   const labels = { pending: "Pendiente", active: "Activo", inactive: "Desactivado" };
-  const actions = {
-    pending: '<button class="button button-primary" data-user-status="active">Aprobar</button>',
-    active: '<button class="button button-outline" data-user-status="inactive">Desactivar</button>',
-    inactive: '<button class="button button-outline" data-user-status="active">Reactivar</button>',
-  };
-  $("#users-list").innerHTML = users.map((user) =>
-    '<div class="admin-row">' +
+  $("#users-list").innerHTML = users.map((user) => {
+    const canManage = user.id !== state.user.id && !user.is_superuser &&
+      (state.user.is_superuser || !hasAdminAccess(user));
+    const status = user.status === "active" ? "inactive" : "active";
+    const action = user.status === "pending" ? "Autorizar" : user.status === "active" ? "Desactivar" : "Reactivar";
+    const menu = canManage ? '<details class="user-actions"><summary aria-label="Acciones para ' + escapeHTML(user.full_name || user.email) + '">Acciones <span aria-hidden="true">⌄</span></summary>' +
+      '<div class="user-actions-menu"><button type="button" data-user-status="' + status + '" data-user-id="' + user.id + '">' + action + '</button>' +
+      '<button type="button" data-user-delete="' + user.id + '">Eliminar usuario</button></div></details>' : "";
+    return '<div class="admin-row">' +
       '<div class="admin-primary">' + escapeHTML(user.email) +
         (user.full_name ? '<span class="admin-secondary">' + escapeHTML(user.full_name) + '</span>' : '') +
         '<span class="admin-secondary">' + escapeHTML(userDepartmentLabel(user)) + '</span></div>' +
       '<div class="admin-secondary admin-created">' + shortDate(user.created_at.slice(0, 10)) + '</div>' +
       '<span class="status-pill status-' + user.status + '">' + labels[user.status] + '</span>' +
-      '<div class="admin-actions">' + (hasAdminAccess(user) ? "" : actions[user.status]) + '</div>' +
-      '<span class="admin-user-id" hidden>' + user.id + '</span>' +
-    '</div>'
-  ).join("") || '<div class="transaction-empty">' + (query ? "Sin coincidencias." : "Todavía no hay solicitudes.") + '</div>';
-  $$("#users-list [data-user-status]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const id = Number(button.closest(".admin-row").querySelector(".admin-user-id").textContent);
-      try {
-        await api("/api/admin/users/status", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ user_id: id, status: button.dataset.userStatus }),
-        });
-        toast("Estado del usuario actualizado.", "success");
-        loadAdminUsers();
-      } catch (error) {
-        toast(error.message, "error");
-      }
-    });
-  });
+      '<div class="admin-actions">' + menu + '</div></div>';
+  }).join("") || '<div class="transaction-empty">' + (query ? "Sin coincidencias." : "Todavía no hay solicitudes.") + '</div>';
+  $$(".user-actions", $("#users-list")).forEach((menu) => menu.addEventListener("toggle", () => {
+    if (menu.open) $$(".user-actions[open]").filter((other) => other !== menu).forEach((other) => { other.open = false; });
+  }));
 }
+
+$("#users-list").addEventListener("click", async (event) => {
+  const deletion = event.target.closest("[data-user-delete]");
+  if (deletion) { openUserDeleteDialog(Number(deletion.dataset.userDelete), deletion); return; }
+  const button = event.target.closest("[data-user-status]");
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  try {
+    await api("/api/admin/users/status", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: Number(button.dataset.userId), status: button.dataset.userStatus }) });
+    toast("Estado del usuario actualizado.", "success");
+    await loadAdminUsers();
+  } catch (error) {
+    toast(error.message, "error");
+  } finally { button.disabled = false; }
+});
+
+let userDeleteSelection = null;
+let userDeleteReturnFocus = null;
+let userDeleteBusy = false;
+function openUserDeleteDialog(id, trigger) {
+  const user = state.users.find((account) => account.id === id);
+  if (!user || !hasAdminAccess(state.user)) return;
+  userDeleteSelection = id;
+  userDeleteReturnFocus = trigger.closest(".user-actions").querySelector("summary");
+  trigger.closest(".user-actions").open = false;
+  $("#user-delete-identity").innerHTML = '<strong>' + escapeHTML(user.full_name || user.email) + '</strong><span>' +
+    escapeHTML(user.email) + '</span><span>' + escapeHTML(userDepartmentLabel(user)) + '</span>';
+  $("#user-delete-dialog").hidden = false;
+  $("#user-delete-dialog").setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  $("#user-delete-dialog button[data-user-delete-cancel]").focus();
+}
+function closeUserDeleteDialog() {
+  if (userDeleteBusy) return;
+  $("#user-delete-dialog").hidden = true;
+  $("#user-delete-dialog").setAttribute("aria-hidden", "true");
+  if ($("#movement-review-panel").hidden) document.body.classList.remove("modal-open");
+  userDeleteSelection = null;
+  const trigger = userDeleteReturnFocus;
+  userDeleteReturnFocus = null;
+  if (trigger?.isConnected) trigger.focus();
+}
+$("#user-delete-dialog").addEventListener("click", (event) => {
+  if (event.target.closest("[data-user-delete-cancel]")) closeUserDeleteDialog();
+});
+$("#user-delete-confirm").addEventListener("click", async () => {
+  if (!userDeleteSelection || userDeleteBusy) return;
+  userDeleteBusy = true;
+  const button = $("#user-delete-confirm");
+  button.disabled = true;
+  button.textContent = "Eliminando…";
+  $("#user-delete-dialog button[data-user-delete-cancel]").disabled = true;
+  try {
+    const result = await api("/api/admin/users/delete", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: userDeleteSelection, confirmed: true }) });
+    userDeleteBusy = false;
+    closeUserDeleteDialog();
+    toast(result.message, "success");
+    await loadAdminUsers();
+    $("#users-search").focus();
+  } catch (error) { toast(error.message, "error"); }
+  finally {
+    userDeleteBusy = false;
+    button.disabled = false;
+    button.textContent = "Confirmar eliminación";
+    $("#user-delete-dialog button[data-user-delete-cancel]").disabled = false;
+  }
+});
 
 function auditLabel(event) {
   const labels = {
@@ -770,6 +871,7 @@ function auditLabel(event) {
     export_xlsx: "Exportación Excel",
     user_approved: "Usuario aprobado",
     user_deactivated: "Usuario desactivado",
+    user_deleted: "Usuario eliminado",
     import_previewed: "Archivo validado",
     import_preview_cancelled: "Carga cancelada",
     import_completed: "Archivo importado",
@@ -855,18 +957,18 @@ function exportReport(format, view) {
   const params = new URLSearchParams(period);
   params.set("format", format);
   params.set("view", view);
-  const department = view === "department" ? getDetailScope() :
-    (view === "global" && hasAdminAccess(state.user) ? $("#global-department").value : null);
+  if (state.user.role === "leadership" && view !== "global") return;
+  const department = view === "department" ? getDetailScope() : state.reportFilters.global.department;
   if (department) params.set("department", department);
   if (view === "all_detail" && !hasAdminAccess(state.user)) {
     toast("La exportación detallada global requiere acceso de tesorería.", "error");
     return;
   }
-  if (view === "department" && $("#detail-search").value.trim()) {
+  if (view === "department" && state.reportFilters.detail.search) {
     const onlyMatches = window.confirm(
       "La búsqueda está activa. Aceptar exporta solo las coincidencias; Cancelar exporta todos los movimientos del período."
     );
-    if (onlyMatches) params.set("q", $("#detail-search").value.trim());
+    if (onlyMatches) params.set("q", state.reportFilters.detail.search);
   }
   window.location.href = "/api/export?" + params.toString();
 }
@@ -1067,6 +1169,7 @@ async function commitImport() {
     refreshPeriodRange(metadata.dateRange);
     state.globalReport = null;
     state.globalQueryKey = null;
+    state.globalSearchKey = null;
     state.detailReport = null;
     state.detailQueryKey = null;
     state.transactionLoaded = 0;
@@ -1174,141 +1277,72 @@ $("#logout-button").addEventListener("click", async () => {
 
 $$(".nav-item").forEach((button) => button.addEventListener("click", () => {
   const view = button.dataset.view;
-  if (state.currentView === "overview" && !readPeriodControls("global")) return;
-  else if (state.currentView === "department" && !readPeriodControls("detail")) return;
+  if (view === "department" && !canReviewMovements(state.user)) return;
+  if (view === "admin" && !hasAdminAccess(state.user)) return;
   syncPeriodControls();
   state.currentView = view;
   updateNav();
   if (view === "overview") loadGlobalReport();
   if (view === "department") {
-    if (state.user.role === "department") state.selectedDepartment = state.user.department_name;
-    if (hasAdminAccess(state.user)) state.selectedDepartment = $("#detail-department").value || null;
-    $("#department-title").textContent = state.selectedDepartment || "Todos los departamentos";
-    state.transactionPage = 1;
-    state.transactionLoaded = 0;
-    state.transactionCursor = null;
+    $("#department-title").textContent = getDetailScope() || "Todos los departamentos";
     loadDepartmentReport();
   }
   if (view === "admin") openAdminTab(state.adminTab);
 }));
 
-$("#global-filter-button").addEventListener("click", loadGlobalReport);
-$("#global-department").addEventListener("change", loadGlobalReport);
-$("#global-year").addEventListener("change", () => {
-  state.period.preset = "custom";
-  state.globalSearchCursor = null;
-  state.globalSearchLoaded = 0;
-  loadGlobalReport();
-});
-$("#detail-year").addEventListener("change", () => {
-  state.period.preset = "custom";
-  state.transactionPage = 1;
-  state.transactionLoaded = 0;
-  state.transactionCursor = null;
-  loadDepartmentReport();
-});
-$$("[data-period-view][data-period-preset]").forEach((button) => {
-  button.addEventListener("click", () => applyPeriodPreset(button.dataset.periodView, button.dataset.periodPreset));
-});
-$$('[data-filter-toggle]').forEach((button) => {
-  button.addEventListener('click', () => {
-    const prefix = button.dataset.filterToggle;
-    setFilterExpanded(prefix, !state.filterExpanded[prefix]);
+for (const prefix of ["global", "detail"]) {
+  $("#" + prefix + "-filter-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    applyReportFilters(prefix);
   });
-});
-document.addEventListener("click", (event) => {
-  if (!event.target.closest(".month-selector")) {
-    $$(".month-selector[open]").forEach((selector) => { selector.open = false; });
+  $("#" + prefix + "-period").addEventListener("change", () => applyPeriodPreset(prefix));
+  $("#" + prefix + "-year").addEventListener("change", () => {
+    if ($("#" + prefix + "-period").value === "custom") $("#" + prefix + "-period").value = "all";
+    applyPeriodPreset(prefix);
+  });
+  for (const field of ["start", "end"]) {
+    $("#" + prefix + "-" + field).addEventListener("change", () => {
+      $("#" + prefix + "-period").value = "custom";
+      updateRangeLabels(prefix);
+    });
   }
+  $("[data-range-done='" + prefix + "']").addEventListener("click", () => {
+    $("#" + prefix + "-range-selector").open = false;
+    $("#" + prefix + "-range-selector > summary").focus();
+  });
+}
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".range-selector")) $$(".range-selector[open]").forEach((selector) => { selector.open = false; });
+  if (!event.target.closest(".user-actions")) $$(".user-actions[open]").forEach((selector) => { selector.open = false; });
   const monthButton = event.target.closest("[data-month-view][data-month-option]");
   const monthAction = event.target.closest("[data-month-view][data-month-action]");
-  const prefix = (monthButton || monthAction || {}).dataset && (monthButton || monthAction).dataset.monthView;
+  const prefix = (monthButton || monthAction)?.dataset.monthView;
   if (!prefix) return;
-  state.period.preset = "custom";
+  $("#" + prefix + "-period").value = "custom";
   if (monthButton) {
     const pressed = monthButton.getAttribute("aria-pressed") === "true";
     monthButton.setAttribute("aria-pressed", pressed ? "false" : "true");
   } else {
     const selectAll = monthAction.dataset.monthAction === "all";
-    $$("[data-month-option]", $("#" + prefix + "-month-options")).forEach((option) => option.setAttribute("aria-pressed", selectAll ? "true" : "false"));
+    $$("[data-month-option]", $("#" + prefix + "-month-options")).forEach((button) => button.setAttribute("aria-pressed", selectAll ? "true" : "false"));
   }
-  if (prefix === "global") {
-    window.clearTimeout(state.globalFilterTimer);
-    state.globalFilterTimer = window.setTimeout(() => loadGlobalReport(), 180);
-  }
-  else {
-    state.transactionPage = 1;
-    state.transactionLoaded = 0;
-    state.transactionCursor = null;
-    window.clearTimeout(state.detailFilterTimer);
-    state.detailFilterTimer = window.setTimeout(() => loadDepartmentReport(), 180);
-  }
+  updateRangeLabels(prefix);
 });
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !$("#movement-review-panel").hidden) {
-    resetMaintenance();
-    return;
+  if (event.key === "Escape") {
+    if (!$("#user-delete-dialog").hidden) closeUserDeleteDialog();
+    else if (!$("#movement-review-panel").hidden) resetMaintenance();
+    else $$(".range-selector[open], .user-actions[open]").forEach((selector) => { selector.open = false; });
   }
-  if (event.key === "Escape") $$(".month-selector[open]").forEach((selector) => { selector.open = false; });
-});
-$("#global-start").addEventListener("change", () => { state.period.preset = "custom"; });
-$("#global-end").addEventListener("change", () => { state.period.preset = "custom"; });
-$("#detail-start").addEventListener("change", () => { state.period.preset = "custom"; });
-$("#detail-end").addEventListener("change", () => { state.period.preset = "custom"; });
-$("#global-search").addEventListener("input", () => {
-  if (state.globalReport) renderDepartmentRows(state.globalReport);
-  state.globalSearchRequest += 1;
-  if (state.globalSearchController) state.globalSearchController.abort();
-  state.globalSearchPage = 1;
-  state.globalSearchLoaded = 0;
-  state.globalSearchCursor = null;
-  window.clearTimeout(state.globalSearchTimer);
-  if (!$("#global-search").value.trim()) {
-    $("#global-search-panel").hidden = true;
-    return;
+  const modal = !$("#user-delete-dialog").hidden ? $("#user-delete-dialog") :
+    !$("#movement-review-panel").hidden ? $("#movement-review-panel") : null;
+  if (event.key === "Tab" && modal) {
+    const controls = $$("button:not([disabled]), input:not([disabled]), [tabindex='0']", modal).filter((item) => item.getClientRects().length);
+    const first = controls[0], last = controls[controls.length - 1];
+    if (!first) return;
+    if (event.shiftKey && (document.activeElement === first || !modal.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && (document.activeElement === last || !modal.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
   }
-  $("#global-search-panel").hidden = false;
-  $("#global-search-list").innerHTML = '<div class="loading">Buscando movimientos…</div>';
-  $("#global-search-more").disabled = true;
-  $("#global-search-more").hidden = true;
-  state.globalSearchTimer = window.setTimeout(() => loadGlobalSearch(), 220);
-});
-$("#detail-filter-button").addEventListener("click", () => {
-  state.transactionPage = 1;
-  state.transactionLoaded = 0;
-  state.transactionCursor = null;
-  state.detailFilterDirty = false;
-  loadDepartmentReport();
-});
-$("#detail-start").addEventListener("change", () => {
-  state.detailFilterDirty = true;
-  state.transactionLoaded = 0;
-  state.transactionCursor = null;
-  $("#load-more-button").disabled = true;
-});
-$("#detail-end").addEventListener("change", () => {
-  state.detailFilterDirty = true;
-  state.transactionLoaded = 0;
-  state.transactionCursor = null;
-  $("#load-more-button").disabled = true;
-});
-$("#detail-department").addEventListener("change", () => {
-  state.selectedDepartment = $("#detail-department").value || null;
-  $("#department-title").textContent = state.selectedDepartment || "Todos los departamentos";
-  state.transactionPage = 1;
-  state.transactionLoaded = 0;
-  state.transactionCursor = null;
-  loadDepartmentReport();
-});
-$("#detail-search").addEventListener("input", () => {
-  state.transactionRequest += 1;
-  if (state.transactionController) state.transactionController.abort();
-  window.clearTimeout(state.detailSearchTimer);
-  state.transactionPage = 1;
-  state.transactionLoaded = 0;
-  state.transactionCursor = null;
-  $("#load-more-button").disabled = true;
-  state.detailSearchTimer = window.setTimeout(() => loadDepartmentReport(false, false), 220);
 });
 $("#load-more-button").addEventListener("click", () => {
   if (!state.transactionLoading && !state.detailFilterDirty && state.transactionCursor) {
@@ -1348,12 +1382,12 @@ $("#audit-export").addEventListener("click", async () => {
   finally { button.disabled = false; }
 });
 function maintenanceButton(kind, id) {
-  if (!hasAdminAccess(state.user) || kind !== "movement") return "";
+  if (!canReviewMovements(state.user) || kind !== "movement") return "";
   return '<button class="text-button maintenance-link" type="button" data-maintenance-id="' + Number(id) + '">Revisar #' + Number(id) + '</button>';
 }
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-maintenance-id]");
-  if (!button || !hasAdminAccess(state.user)) return;
+  if (!button || !canReviewMovements(state.user)) return;
   resetMaintenance(false);
   maintenanceReturnFocus = button;
   const selection = {kind: "movement", id: Number(button.dataset.maintenanceId)};
@@ -1362,21 +1396,29 @@ document.addEventListener("click", async (event) => {
   modal.setAttribute("aria-hidden", "false");
   document.body.classList.add("modal-open");
   $("#maintenance-loading").hidden = false;
+  $("#maintenance-back-detail").focus();
+  const controller = new AbortController();
+  maintenanceController = controller;
   try {
-    const result = await api("/api/superuser/record", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({...selection, action: "preview"})});
+    const result = await api("/api/superuser/record", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({...selection, action: "preview"}), signal: controller.signal});
+    if (maintenanceController !== controller || modal.hidden) return;
     maintenanceSelection = {...selection, fingerprint: result.fingerprint};
     renderMaintenanceRecord(result.record);
     $("#maintenance-loading").hidden = true;
     $("#maintenance-result").hidden = false;
     $("#maintenance-back-detail").focus();
   } catch (error) {
+    if (error.name === "AbortError" || maintenanceController !== controller) return;
     resetMaintenance();
     toast(error.message, "error");
   }
 });
+let maintenanceController = null;
 let maintenanceSelection = null;
 let maintenanceReturnFocus = null;
 function resetMaintenance(restoreFocus = true) {
+  if (maintenanceController) maintenanceController.abort();
+  maintenanceController = null;
   maintenanceSelection = null;
   const modal = $("#movement-review-panel");
   modal.hidden = true;
@@ -1410,6 +1452,7 @@ $("#maintenance-delete").addEventListener("click", async () => {
     resetMaintenance();
     state.globalReport = null;
     state.globalQueryKey = null;
+    state.globalSearchKey = null;
     state.detailReport = null;
     state.detailQueryKey = null;
     state.detailFilterDirty = true;

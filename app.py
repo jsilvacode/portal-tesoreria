@@ -466,12 +466,12 @@ def create_schema(conn: sqlite3.Connection) -> None:
             email TEXT NOT NULL UNIQUE COLLATE NOCASE,
             full_name TEXT NOT NULL DEFAULT '',
             password_hash TEXT NOT NULL,
-            role TEXT NOT NULL CHECK(role IN ('treasurer', 'department')),
+            role TEXT NOT NULL CHECK(role IN ('treasurer', 'department', 'leadership')),
             department_name TEXT REFERENCES departments(name),
             status TEXT NOT NULL CHECK(status IN ('pending', 'active', 'inactive')),
             created_at TEXT NOT NULL,
             approved_at TEXT,
-            CHECK((role = 'treasurer' AND department_name IS NULL) OR
+            CHECK((role IN ('treasurer', 'leadership') AND department_name IS NULL) OR
                   (role = 'department' AND department_name IS NOT NULL))
         );
         CREATE TABLE IF NOT EXISTS import_batches (
@@ -516,7 +516,11 @@ def create_schema(conn: sqlite3.Connection) -> None:
             user_id INTEGER REFERENCES users(id),
             event_type TEXT NOT NULL,
             detail TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            actor_user_id INTEGER,
+            actor_email TEXT NOT NULL DEFAULT '',
+            actor_name TEXT NOT NULL DEFAULT '',
+            actor_department TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
         CREATE TABLE IF NOT EXISTS import_previews (
@@ -593,6 +597,7 @@ def apply_migrations(conn) -> None:
     )
     apply_user_name_migration(conn)
     conn.commit()
+    apply_access_profile_migration(conn)
 
 
 def apply_user_name_migration(conn) -> None:
@@ -607,6 +612,79 @@ def apply_user_name_migration(conn) -> None:
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
         (2, utc_now()),
     )
+
+
+def apply_access_profile_migration(conn) -> None:
+    """Add the general-only profile and retain audit identity after deletion."""
+    if conn.execute("SELECT 1 FROM schema_migrations WHERE version = 3").fetchone():
+        return
+    if isinstance(conn, PostgresConnection):
+        conn.execute("""ALTER TABLE users
+            DROP CONSTRAINT IF EXISTS users_role_check,
+            DROP CONSTRAINT IF EXISTS users_check,
+            ADD CONSTRAINT users_role_check CHECK(role IN ('treasurer', 'department', 'leadership')),
+            ADD CONSTRAINT users_check CHECK(
+                (role IN ('treasurer', 'leadership') AND department_name IS NULL) OR
+                (role = 'department' AND department_name IS NOT NULL))""")
+        conn.execute("""ALTER TABLE audit_log
+            ADD COLUMN IF NOT EXISTS actor_user_id BIGINT,
+            ADD COLUMN IF NOT EXISTS actor_email TEXT NOT NULL DEFAULT '',
+            ADD COLUMN IF NOT EXISTS actor_name TEXT NOT NULL DEFAULT '',
+            ADD COLUMN IF NOT EXISTS actor_department TEXT NOT NULL DEFAULT ''""")
+    else:
+        # SQLite CHECK constraints require rebuilding this table. Disable FK
+        # enforcement only inside this offline migration and validate before commit.
+        schema = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").fetchone()[0]
+        if "'leadership'" not in schema:
+            updated = schema.replace("'treasurer', 'department'", "'treasurer', 'department', 'leadership'")
+            updated = updated.replace("role = 'treasurer' AND", "role IN ('treasurer', 'leadership') AND")
+            updated = re.sub(r"CREATE TABLE\s+(?:IF NOT EXISTS\s+)?users\b", "CREATE TABLE users_profile_upgrade", updated, count=1, flags=re.I)
+            columns = [row["name"] for row in conn.execute("PRAGMA table_info(users)")]
+            column_sql = ", ".join('"' + name.replace('"', '""') + '"' for name in columns)
+            extras = [row[0] for row in conn.execute("SELECT sql FROM sqlite_master WHERE tbl_name = 'users' AND type IN ('index', 'trigger') AND sql IS NOT NULL")]
+            sequence = conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'users'").fetchone()
+            conn.commit()
+            conn.execute("PRAGMA foreign_keys = OFF")
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(updated)
+                conn.execute("INSERT INTO users_profile_upgrade (" + column_sql + ") SELECT " + column_sql + " FROM users")
+                conn.execute("DROP TABLE users")
+                conn.execute("ALTER TABLE users_profile_upgrade RENAME TO users")
+                for statement in extras:
+                    conn.execute(statement)
+                if sequence:
+                    conn.execute("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'users'", (sequence[0],))
+                if conn.execute("PRAGMA foreign_key_check").fetchone():
+                    raise ValueError("La migración de usuarios no pudo conservar las referencias.")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.execute("PRAGMA foreign_keys = ON")
+        audit_columns = {row["name"] for row in conn.execute("PRAGMA table_info(audit_log)")}
+        for name, definition in (
+            ("actor_user_id", "INTEGER"), ("actor_email", "TEXT NOT NULL DEFAULT ''"),
+            ("actor_name", "TEXT NOT NULL DEFAULT ''"), ("actor_department", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if name not in audit_columns:
+                conn.execute("ALTER TABLE audit_log ADD COLUMN " + name + " " + definition)
+    conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)", (3, utc_now()))
+    conn.commit()
+
+
+def delete_user_preserving_history(conn, account: dict) -> None:
+    """Remove an account and sessions without deleting its accounting or audit."""
+    user_id = account["id"]
+    conn.execute("""UPDATE audit_log SET actor_user_id = ?, actor_email = ?,
+                    actor_name = ?, actor_department = ?, user_id = NULL WHERE user_id = ?""",
+                 (user_id, account["email"], account["full_name"], account["department_name"] or
+                  ("Pastor/Ancianos" if account["role"] == "leadership" else "Tesorería"), user_id))
+    conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM import_previews WHERE created_by = ?", (user_id,))
+    conn.execute("UPDATE import_batches SET imported_by = NULL WHERE imported_by = ?", (user_id,))
+    conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
 
 
 def record_audit(
@@ -643,12 +721,14 @@ def has_admin_access(user: dict) -> bool:
 
 def session_metadata(conn, user: dict | None) -> dict:
     user = effective_user(user) if user else None
-    dates = conn.execute(
-        "SELECT MIN(movement_date) AS start, MAX(movement_date) AS end FROM transactions"
-    ).fetchone()
+    dates = conn.execute("""SELECT SUBSTR(movement_date, 1, 4) AS year,
+                            MIN(movement_date) AS start, MAX(movement_date) AS end
+                            FROM transactions GROUP BY SUBSTR(movement_date, 1, 4) ORDER BY year""").fetchall()
     return {
         "user": user,
-        "dateRange": {"start": dates["start"], "end": dates["end"]},
+        "dateRange": {"start": dates[0]["start"] if dates else None,
+                      "end": dates[-1]["end"] if dates else None,
+                      "years": [int(row["year"]) for row in dates]},
         "departments": [
             row["name"] for row in conn.execute("SELECT name FROM departments ORDER BY name")
         ],
@@ -1017,12 +1097,16 @@ def intervals_sql(column: str, intervals: list[tuple[str, str]]) -> tuple[str, l
 
 
 def resolve_summary_department(user: dict, requested: str | None, view: str) -> str | None:
-    if has_admin_access(user):
+    if view not in ("global", "department", "all_detail"):
+        raise ValueError("La vista del informe no es válida.")
+    if view == "global" or has_admin_access(user):
         return requested
+    if user["role"] != "department" or view == "all_detail":
+        raise PermissionError("Tu cuenta solo tiene acceso al balance general.")
     own_department = user["department_name"]
     if view == "department":
         if requested and requested != own_department:
-            raise ValueError("No tienes acceso a ese departamento.")
+            raise PermissionError("No tienes acceso a ese departamento.")
         return own_department
     return None
 
@@ -1851,6 +1935,9 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 user = self.require_user(conn)
                 if not user:
                     return
+                if user["role"] == "leadership":
+                    self.send_json(403, {"error": "Tu cuenta solo tiene acceso al balance general."})
+                    return
                 start, end = period_bounds(conn, (query.get("start") or [None])[0], (query.get("end") or [None])[0])
                 requested = (query.get("department") or [None])[0]
                 if user["role"] == "department":
@@ -1922,11 +2009,11 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 search = ((query.get("q") or [""])[0] or "").strip()[:120]
                 where, params = [], []
                 if not user.get("is_superuser") and superuser_id() > 0:
-                    where.append("(a.user_id IS NULL OR a.user_id <> ?)")
+                    where.append("(COALESCE(a.user_id, a.actor_user_id) IS NULL OR COALESCE(a.user_id, a.actor_user_id) <> ?)")
                     params.append(superuser_id())
                 audit_user = ((query.get("user_id") or [""])[0] or "").strip()
                 if audit_user:
-                    where.append("a.user_id = ?")
+                    where.append("COALESCE(a.user_id, a.actor_user_id) = ?")
                     params.append(int(audit_user))
                 if start and end and start > end:
                     raise ValueError("La fecha inicial debe ser anterior a la final.")
@@ -1947,10 +2034,10 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 if department:
                     scope = "a.detail::jsonb ->> 'scope'" if isinstance(conn, PostgresConnection) else "json_extract(a.detail, '$.scope')"
                     dept = "a.detail::jsonb ->> 'department'" if isinstance(conn, PostgresConnection) else "json_extract(a.detail, '$.department')"
-                    where.append("(" + scope + " = ? OR " + dept + " = ? OR (" + scope + " IS NULL AND " + dept + " IS NULL AND u.department_name = ?))")
+                    where.append("(" + scope + " = ? OR " + dept + " = ? OR (" + scope + " IS NULL AND " + dept + " IS NULL AND COALESCE(u.department_name, a.actor_department) = ?))")
                     params.extend((department, department, department))
                 if search:
-                    searchable = "a.created_at || ' ' || a.event_type || ' ' || a.detail || ' ' || COALESCE(u.email, '')"
+                    searchable = "a.created_at || ' ' || a.event_type || ' ' || a.detail || ' ' || COALESCE(u.email, a.actor_email, '') || ' ' || COALESCE(u.full_name, a.actor_name, '')"
                     normalized = (
                         "translate(lower(" + searchable + "), "
                         + "'áàäâãåéèëêíìïîóòöôõúùüûñç', 'aaaaaaeeeeiiiiooooouuuunc')"
@@ -1979,7 +2066,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 if (query.get("format") or [""])[0] == "csv":
                     if total > 20000:
                         raise ValueError("Acota las fechas para exportar hasta 20.000 eventos.")
-                    rows = conn.execute("SELECT a.id, a.created_at, u.email, a.event_type, a.detail" + base_sql + " ORDER BY a.id DESC", params).fetchall()
+                    rows = conn.execute("SELECT a.id, a.created_at, COALESCE(u.email, a.actor_email) AS email, a.event_type, a.detail" + base_sql + " ORDER BY a.id DESC", params).fetchall()
                     output = io.StringIO()
                     writer = csv.writer(output, delimiter=";")
                     writer.writerow(["ID", "Fecha UTC", "Usuario", "Acción", "Detalle"])
@@ -1997,7 +2084,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                             raise ValueError
                     except ValueError as exc:
                         raise ValueError("El cursor de actividad no es válido.") from exc
-                select_sql = "SELECT a.id, a.event_type, a.detail, a.created_at, u.email" + base_sql
+                select_sql = "SELECT a.id, a.event_type, a.detail, a.created_at, COALESCE(u.email, a.actor_email) AS email" + base_sql
                 select_params = list(params)
                 if cursor_id is not None:
                     select_sql += (" AND " if where else " WHERE ") + "a.id < ?"
@@ -2016,6 +2103,8 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 self.handle_export(conn, query)
             else:
                 self.send_json(404, {"error": "Ruta no encontrada."})
+        except PermissionError as exc:
+            self.send_json(403, {"error": str(exc)})
         except ValueError as exc:
             self.send_json(400, {"error": str(exc)})
         except Exception:
@@ -2047,6 +2136,8 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 self.handle_superuser_record(conn)
             elif parsed.path == "/api/admin/users/status":
                 self.handle_user_status(conn)
+            elif parsed.path == "/api/admin/users/delete":
+                self.handle_user_delete(conn)
             elif parsed.path == "/api/admin/import/preview":
                 self.handle_import_preview(conn)
             elif parsed.path == "/api/admin/import/cancel":
@@ -2055,6 +2146,8 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 self.handle_import_commit(conn)
             else:
                 self.send_json(404, {"error": "Ruta no encontrada."})
+        except PermissionError as exc:
+            self.send_json(403, {"error": str(exc)})
         except ValueError as exc:
             self.send_json(400, {"error": str(exc)})
         except Exception:
@@ -2120,17 +2213,19 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             raise ValueError("Escribe un correo válido.")
         if len(password) < 10:
             raise ValueError("La contraseña debe tener al menos 10 caracteres.")
-        if not conn.execute("SELECT 1 FROM departments WHERE name = ?", (department,)).fetchone():
+        role = "leadership" if department == "Pastor/Ancianos" else "department"
+        if role == "department" and not conn.execute("SELECT 1 FROM departments WHERE name = ?", (department,)).fetchone():
             raise ValueError("Selecciona un departamento de la lista.")
         try:
             cursor = conn.execute(
                 """INSERT INTO users(email, full_name, password_hash, role, department_name, status, created_at)
-                   VALUES (?, ?, ?, 'department', ?, 'pending', ?)""",
-                (email, full_name, password_hash(password), department, utc_now()),
+                   VALUES (?, ?, ?, ?, ?, 'pending', ?)""",
+                (email, full_name, password_hash(password), role,
+                 department if role == "department" else None, utc_now()),
             )
         except sqlite3.IntegrityError as exc:
             raise ValueError("Ya existe una solicitud para ese correo.") from exc
-        record_audit(conn, cursor.lastrowid, "registration_submitted", {"department": department})
+        record_audit(conn, cursor.lastrowid, "registration_submitted", {"department": department, "role": role})
         conn.commit()
         self.send_json(
             201,
@@ -2161,11 +2256,14 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         actor = self.require_user(conn)
         if not actor:
             return
-        if not has_admin_access(actor):
-            self.send_json(403, {"error": "Esta acción requiere acceso autorizado."})
-            return
         payload = self.parse_json_body()
         kind = payload.get("kind")
+        action = payload.get("action")
+        if not has_admin_access(actor) and not (
+            actor["role"] == "department" and kind == "movement" and action == "preview"
+        ):
+            self.send_json(403, {"error": "Esta acción requiere acceso autorizado."})
+            return
         tables = {"movement": "transactions", "user": "users", "activity": "audit_log"}
         if kind not in tables:
             raise ValueError("Selecciona el tipo de registro.")
@@ -2178,14 +2276,21 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         if kind == "user" and record_id == actor["id"]:
             raise ValueError("No puedes eliminar tu propia cuenta de superusuario.")
         table = tables[kind]
-        if not isinstance(conn, PostgresConnection):
-            conn.execute("BEGIN IMMEDIATE")
-        if isinstance(conn, PostgresConnection):
-            conn.execute("SELECT pg_advisory_xact_lock(8260926)")
-        lock = " FOR UPDATE" if isinstance(conn, PostgresConnection) else ""
-        row = conn.execute("SELECT * FROM " + table + " WHERE id = ?" + lock, (record_id,)).fetchone()
+        deleting = action == "delete"
+        if deleting and not actor.get("is_superuser"):
+            self.send_json(403, {"error": "Solo el superusuario puede eliminar registros."})
+            return
+        if deleting:
+            if isinstance(conn, PostgresConnection):
+                conn.execute("SELECT pg_advisory_xact_lock(8260926)")
+            else:
+                conn.execute("BEGIN IMMEDIATE")
+        lock = " FOR UPDATE" if deleting and isinstance(conn, PostgresConnection) else ""
+        scope_sql = " AND department_name = ?" if actor["role"] == "department" else ""
+        params = (record_id, actor["department_name"]) if scope_sql else (record_id,)
+        row = conn.execute("SELECT * FROM " + table + " WHERE id = ?" + scope_sql + lock, params).fetchone()
         if not row:
-            raise ValueError("El registro no existe.")
+            raise ValueError("El registro no existe o no está disponible para tu cuenta.")
         if not actor.get("is_superuser") and superuser_id() > 0:
             if kind == "user" and record_id == superuser_id():
                 self.send_json(403, {"error": "La cuenta root no está disponible para tesorería."})
@@ -2195,7 +2300,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 return
         visible = {k: v for k, v in dict(row).items() if k != "password_hash"}
         fingerprint = hashlib.sha256(json.dumps(visible, sort_keys=True, default=str).encode()).hexdigest()
-        if payload.get("action") == "preview":
+        if action == "preview":
             self.send_json(200, {"record": visible, "fingerprint": fingerprint})
             return
         if not actor.get("is_superuser") or actor["id"] != superuser_id():
@@ -2208,11 +2313,9 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             self.send_json(403, {"error": "Contraseña incorrecta."})
             return
         if kind == "user":
-            conn.execute("DELETE FROM sessions WHERE user_id = ?", (record_id,))
-            conn.execute("DELETE FROM import_previews WHERE created_by = ?", (record_id,))
-            conn.execute("UPDATE import_batches SET imported_by = NULL WHERE imported_by = ?", (record_id,))
-            conn.execute("UPDATE audit_log SET user_id = NULL WHERE user_id = ?", (record_id,))
-        conn.execute("DELETE FROM " + table + " WHERE id = ?", (record_id,))
+            delete_user_preserving_history(conn, dict(row))
+        else:
+            conn.execute("DELETE FROM " + table + " WHERE id = ?", (record_id,))
         record_audit(conn, actor["id"], "superuser_deleted", {"kind": kind, "record_id": record_id})
         conn.commit()
         self.send_json(200, {"message": "Registro eliminado."})
@@ -2255,6 +2358,35 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         )
         conn.commit()
         self.send_json(200, {"message": "Estado actualizado."})
+
+    def handle_user_delete(self, conn):
+        actor = self.require_treasurer(conn)
+        if not actor:
+            return
+        payload = self.parse_json_body()
+        user_id = int(payload.get("user_id") or 0)
+        if payload.get("confirmed") is not True:
+            raise ValueError("Confirma la eliminación del usuario.")
+        if user_id == actor["id"] or user_id == superuser_id():
+            raise PermissionError("No puedes eliminar esta cuenta administrativa.")
+        if isinstance(conn, PostgresConnection):
+            lock = " FOR UPDATE"
+        else:
+            conn.execute("BEGIN IMMEDIATE")
+            lock = ""
+        target = conn.execute("SELECT * FROM users WHERE id = ?" + lock, (user_id,)).fetchone()
+        if not target:
+            raise ValueError("No se encontró el usuario.")
+        if not actor.get("is_superuser") and target["role"] == "treasurer":
+            raise PermissionError("Tesorería solo puede eliminar cuentas de departamentos y Pastor/Ancianos.")
+        delete_user_preserving_history(conn, dict(target))
+        record_audit(conn, actor["id"], "user_deleted", {
+            "user_id": user_id, "email": target["email"], "name": target["full_name"],
+            "department": target["department_name"] or
+                ("Pastor/Ancianos" if target["role"] == "leadership" else "Tesorería"),
+        })
+        conn.commit()
+        self.send_json(200, {"message": "Usuario eliminado. Su bitácora se conservó."})
 
     def parse_uploaded_xlsx(self) -> tuple[str, bytes]:
         content_type = self.headers.get("Content-Type", "")
@@ -2560,13 +2692,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         if format_name not in ("xlsx", "pdf"):
             self.send_json(400, {"error": "Formato no compatible."})
             return
-        if user["role"] == "department":
-            scope = user["department_name"] if view == "department" else None
-            if requested and requested != user["department_name"] and view == "department":
-                self.send_json(403, {"error": "No tienes acceso a ese departamento."})
-                return
-        else:
-            scope = requested
+        scope = resolve_summary_department(user, requested, view)
         summary = get_summary(conn, start, end, scope, year, months)
         include_detail = view == "department" or (
             has_admin_access(user) and view == "all_detail"

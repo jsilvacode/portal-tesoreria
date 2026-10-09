@@ -115,39 +115,38 @@
             </div>
           </div>
 
-          <div class="filter-bar">
-            <div class="filter-head">
-              <div class="filter-title"><span class="filter-glyph" aria-hidden="true">◷</span><span>Período del informe</span></div>
-              <div class="filter-head-actions">
-                <div class="period-shortcuts" role="group" aria-label="Períodos rápidos">
-                  <button type="button" data-period-view="global" data-period-preset="all">Todo</button>
-                  <button type="button" data-period-view="global" data-period-preset="30">30 días</button>
-                  <button type="button" data-period-view="global" data-period-preset="60">60 días</button>
-                  <button type="button" data-period-view="global" data-period-preset="90">90 días</button>
-                  <button type="button" data-period-view="global" data-period-preset="year">Año actual</button>
-                </div>
-                <button class="filter-toggle" type="button" data-filter-toggle="global" aria-expanded="false" aria-controls="global-filter-fields">
-                  <span>Filtros y búsqueda</span><span class="filter-chevron" aria-hidden="true">⌄</span>
-                </button>
+          <form id="global-filter-form" class="filter-bar report-filter" aria-label="Filtros del informe">
+            <div class="filter-title"><span class="filter-glyph" aria-hidden="true">◷</span><span>Filtrar período</span></div>
+            <div class="report-filter-controls">
+              <label id="global-department-filter" class="report-department">Departamento<select id="global-department"><option value="">Todos los departamentos</option></select></label>
+              <label>Período<select id="global-period">
+                <option value="all">Todo el período</option>
+                <option value="30">30 días</option><option value="60">60 días</option><option value="90">90 días</option>
+                <option value="custom" hidden>Personalizado</option>
+              </select></label>
+              <label class="report-year">Año<select id="global-year"></select></label>
+              <div class="report-range-field">
+                <span id="global-range-label" class="report-control-label">Rango de fechas</span>
+                <details class="range-selector" id="global-range-selector">
+                  <summary aria-labelledby="global-range-label global-range-summary"><span id="global-range-summary">Seleccionar fechas</span><span class="range-chevron" aria-hidden="true">⌄</span></summary>
+                  <div class="range-selector-panel">
+                    <div class="range-dates">
+                      <label>Desde<input id="global-start" type="date"></label>
+                      <label>Hasta<input id="global-end" type="date"></label>
+                    </div>
+                    <div class="range-months">
+                      <span id="global-month-summary" class="report-control-label">Meses · todos</span>
+                      <div id="global-month-options" class="month-selector-options"></div>
+                      <div class="month-selector-actions"><button type="button" data-month-action="all" data-month-view="global">Todos</button><button type="button" data-month-action="clear" data-month-view="global">Quitar selección</button></div>
+                    </div>
+                    <button class="text-button range-done" type="button" data-range-done="global">Listo</button>
+                  </div>
+                </details>
               </div>
+              <label class="report-search">Buscar<input id="global-search" type="search" maxlength="120" autocomplete="off" placeholder="Departamento, persona, monto o fecha"></label>
+              <button id="global-filter-button" class="button button-primary report-filter-submit" type="submit">Filtrar</button>
             </div>
-            <div id="global-filter-fields" class="filter-fields" hidden>
-              <label id="global-department-filter" hidden>Departamento<select id="global-department"><option value="">Todos</option></select></label>
-              <label class="year-filter">Año<select id="global-year"><option value="">Todos</option></select></label>
-              <details class="month-selector">
-                <summary id="global-month-summary">Todos los meses</summary>
-                <div class="month-selector-panel">
-                  <div class="month-selector-actions"><button type="button" data-month-action="all" data-month-view="global">Seleccionar todos</button><button type="button" data-month-action="clear" data-month-view="global">Quitar selección</button></div>
-                  <div id="global-month-options" class="month-selector-options"></div>
-                </div>
-              </details>
-              <label>Desde<input id="global-start" type="date"></label>
-              <span class="date-separator" aria-hidden="true">—</span>
-              <label>Hasta<input id="global-end" type="date"></label>
-              <label class="search-control">Buscar<input id="global-search" type="search" autocomplete="off" placeholder="Departamento, persona, monto o fecha"></label>
-              <button id="global-filter-button" class="button button-primary" type="button">Aplicar</button>
-            </div>
-          </div>
+          </form>
 
           <article id="global-search-panel" class="panel search-results-panel" hidden>
             <div class="panel-heading transaction-heading">
@@ -208,39 +207,39 @@
               <button class="button button-soft export-button" data-format="xlsx" data-view="department" type="button">Excel</button>
             </div>
           </div>
-          <div class="filter-bar">
-            <div class="filter-head">
-              <div class="filter-title"><span class="filter-glyph" aria-hidden="true">◷</span><span>Período del informe</span></div>
-              <div class="filter-head-actions">
-                <div class="period-shortcuts" role="group" aria-label="Períodos rápidos">
-                  <button type="button" data-period-view="detail" data-period-preset="all">Todo</button>
-                  <button type="button" data-period-view="detail" data-period-preset="30">30 días</button>
-                  <button type="button" data-period-view="detail" data-period-preset="60">60 días</button>
-                  <button type="button" data-period-view="detail" data-period-preset="90">90 días</button>
-                  <button type="button" data-period-view="detail" data-period-preset="year">Año actual</button>
-                </div>
-                <button class="filter-toggle" type="button" data-filter-toggle="detail" aria-expanded="false" aria-controls="detail-filter-fields">
-                  <span>Filtros y búsqueda</span><span class="filter-chevron" aria-hidden="true">⌄</span>
-                </button>
+          <form id="detail-filter-form" class="filter-bar report-filter" aria-label="Filtros del informe">
+            <div class="filter-title"><span class="filter-glyph" aria-hidden="true">◷</span><span>Filtrar período</span></div>
+            <div class="report-filter-controls">
+              <label id="detail-department-filter" class="report-department">Departamento<select id="detail-department"><option value="">Todos los departamentos</option></select></label>
+              <label>Período<select id="detail-period">
+                <option value="all">Todo el período</option>
+                <option value="30">30 días</option><option value="60">60 días</option><option value="90">90 días</option>
+                <option value="custom" hidden>Personalizado</option>
+              </select></label>
+              <label class="report-year">Año<select id="detail-year"></select></label>
+              <div class="report-range-field">
+                <span id="detail-range-label" class="report-control-label">Rango de fechas</span>
+                <details class="range-selector" id="detail-range-selector">
+                  <summary aria-labelledby="detail-range-label detail-range-summary"><span id="detail-range-summary">Seleccionar fechas</span><span class="range-chevron" aria-hidden="true">⌄</span></summary>
+                  <div class="range-selector-panel">
+                    <div class="range-dates">
+                      <label>Desde<input id="detail-start" type="date"></label>
+                      <label>Hasta<input id="detail-end" type="date"></label>
+                    </div>
+                    <div class="range-months">
+                      <span id="detail-month-summary" class="report-control-label">Meses · todos</span>
+                      <div id="detail-month-options" class="month-selector-options"></div>
+                      <div class="month-selector-actions"><button type="button" data-month-action="all" data-month-view="detail">Todos</button><button type="button" data-month-action="clear" data-month-view="detail">Quitar selección</button></div>
+                    </div>
+                    <button class="text-button range-done" type="button" data-range-done="detail">Listo</button>
+                  </div>
+                </details>
               </div>
+              <label class="report-search">Buscar<input id="detail-search" type="search" maxlength="120" autocomplete="off" placeholder="Persona, glosa, monto o fecha"></label>
+              <button id="detail-filter-button" class="button button-primary report-filter-submit" type="submit">Filtrar</button>
             </div>
-            <div id="detail-filter-fields" class="filter-fields" hidden>
-              <label id="detail-department-filter" hidden>Departamento<select id="detail-department"></select></label>
-              <label class="year-filter">Año<select id="detail-year"><option value="">Todos</option></select></label>
-              <details class="month-selector">
-                <summary id="detail-month-summary">Todos los meses</summary>
-                <div class="month-selector-panel">
-                  <div class="month-selector-actions"><button type="button" data-month-action="all" data-month-view="detail">Seleccionar todos</button><button type="button" data-month-action="clear" data-month-view="detail">Quitar selección</button></div>
-                  <div id="detail-month-options" class="month-selector-options"></div>
-                </div>
-              </details>
-              <label>Desde<input id="detail-start" type="date"></label>
-              <span class="date-separator" aria-hidden="true">—</span>
-              <label>Hasta<input id="detail-end" type="date"></label>
-              <label class="search-control">Buscar<input id="detail-search" type="search" autocomplete="off" placeholder="Persona, glosa, monto o fecha"></label>
-              <button id="detail-filter-button" class="button button-primary" type="button">Filtrar</button>
-            </div>
-          </div>
+          </form>
+
           <div id="detail-metrics" class="metric-grid"></div>
           <article class="panel">
             <div class="panel-heading transaction-heading">
@@ -315,12 +314,25 @@
           <p id="maintenance-loading" class="movement-review-loading" role="status">Consultando movimiento…</p>
           <div id="maintenance-result" hidden>
             <pre id="maintenance-record"></pre>
-            <p id="maintenance-readonly-note" class="muted" hidden>Vista de consulta para tesorería. Los registros no se pueden eliminar desde esta cuenta.</p>
+            <p id="maintenance-readonly-note" class="muted" hidden>Consulta del movimiento contable.</p>
             <div id="maintenance-delete-controls">
               <p>La eliminación es permanente.</p>
               <label class="admin-search">Tu contraseña<input id="maintenance-password" type="password" autocomplete="current-password"></label>
               <button id="maintenance-delete" class="button button-outline" type="button">Eliminar este movimiento</button>
             </div>
+          </div>
+        </section>
+      </div>
+
+      <div id="user-delete-dialog" class="movement-review-modal" hidden aria-hidden="true">
+        <div class="movement-review-scrim" data-user-delete-cancel></div>
+        <section class="movement-review-card user-delete-card" role="dialog" aria-modal="true" aria-labelledby="user-delete-title" aria-describedby="user-delete-note">
+          <h2 id="user-delete-title">Eliminar usuario</h2>
+          <div id="user-delete-identity" class="user-delete-identity"></div>
+          <p id="user-delete-note">La cuenta se eliminará y sus sesiones se cerrarán. Los registros contables y la bitácora se conservan.</p>
+          <div class="user-delete-buttons">
+            <button class="button button-outline" type="button" data-user-delete-cancel>Cancelar</button>
+            <button id="user-delete-confirm" class="button button-danger" type="button">Confirmar eliminación</button>
           </div>
         </section>
       </div>
