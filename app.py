@@ -1270,9 +1270,11 @@ def get_transactions(
     search: str | None = None,
     year: int | None = None,
     months: list[int] | None = None,
+    movement_kind: str = "all",
 ) -> list[dict]:
     page = get_transactions_page(
-        conn, start, end, department_name, search, year, months, page_size=None
+        conn, start, end, department_name, search, year, months, page_size=None,
+        movement_kind=movement_kind,
     )
     return page["transactions"]
 
@@ -1288,7 +1290,10 @@ def get_transactions_page(
     page: int = 1,
     page_size: int | None = 25,
     cursor: tuple[str, int] | None = None,
+    movement_kind: str = "all",
 ) -> dict:
+    if movement_kind not in ("all", "income", "expense"):
+        raise ValueError("El filtro de tipo de movimiento no es válido.")
     intervals = selected_period_intervals(start, end, year, months)
     period_end = intervals[-1][1] if intervals else end
     visible_period, period_params = intervals_sql("movement_date", intervals)
@@ -1307,6 +1312,10 @@ def get_transactions_page(
         SELECT """ + ledger_fields + ",\n               d.opening_balance + SUM(t.amount) OVER (PARTITION BY t.department_name ORDER BY t.movement_date, t.id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_balance\n""" + """        FROM transactions t JOIN departments d ON d.name = t.department_name
         WHERE """ + " AND ".join(where) + "\n    ), selected AS (\n        SELECT * FROM ledger WHERE " + visible_period
     visible_params: list = list(period_params)
+    if movement_kind == "income":
+        ledger += " AND amount > 0"
+    elif movement_kind == "expense":
+        ledger += " AND amount < 0"
     if search:
         terms = re.findall(r"[a-z0-9]+", normalize_search_text(search))
         # Include displayed dates, all identifying columns and both original currency units
@@ -1400,6 +1409,11 @@ def summary_filter_caption(summary: dict) -> str:
         parts.append("Año " + str(filters["year"]))
     if filters.get("months"):
         parts.append("Meses: " + ", ".join(MONTH_NAMES_ES[int(month) - 1] for month in filters["months"]))
+    movement_kind = filters.get("movementKind")
+    if movement_kind == "income":
+        parts.append("Detalle: solo ingresos")
+    elif movement_kind == "expense":
+        parts.append("Detalle: solo egresos")
     return " · ".join(parts)
 
 
@@ -1473,13 +1487,13 @@ def export_xlsx(summary: dict, transactions: list[dict] | None) -> bytes:
         headers = [
             "Fecha Movimiento",
             "Fecha del Evento",
+            "Importe firmado",
+            "Saldo acumulado",
             "Departamento",
             "Tipo",
             "Descripción",
             "Aportante",
             "Observaciones",
-            "Importe firmado",
-            "Saldo acumulado",
         ]
         detail.append(headers)
         for row in transactions:
@@ -1487,13 +1501,13 @@ def export_xlsx(summary: dict, transactions: list[dict] | None) -> bytes:
                 [
                     row["movement_date"],
                     row["event_date"],
+                    row["amount"] / 100,
+                    row["running_balance"] / 100,
                     row["department_name"],
                     row["movement_type"],
                     row["description"],
                     row["donor_name"],
                     row["observations"],
-                    row["amount"] / 100,
-                    row["running_balance"] / 100,
                 ]
             )
         for cell in detail[1]:
@@ -1502,18 +1516,18 @@ def export_xlsx(summary: dict, transactions: list[dict] | None) -> bytes:
         for row in detail.iter_rows(min_row=2):
             for cell in row:
                 cell.alignment = Alignment(vertical="top", wrap_text=True)
-                if cell.column >= 8:
+                if cell.column in (3, 4):
                     cell.number_format = '#,##0.00;[Red](#,##0.00);-'
         for column, width in {
             "A": 16,
             "B": 16,
-            "C": 32,
-            "D": 27,
-            "E": 56,
-            "F": 32,
-            "G": 36,
-            "H": 20,
-            "I": 20,
+            "C": 20,
+            "D": 20,
+            "E": 32,
+            "F": 27,
+            "G": 56,
+            "H": 32,
+            "I": 36,
         }.items():
             detail.column_dimensions[column].width = width
         detail.freeze_panes = "A2"
@@ -1883,6 +1897,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 requested = (query.get("department") or [None])[0]
                 scope = resolve_summary_department(user, requested, "department")
                 search = ((query.get("q") or [""])[0] or "").strip()[:120]
+                movement_kind = ((query.get("flow") or ["all"])[0] or "all").strip()
                 page = max(1, int((query.get("page") or ["1"])[0]))
                 cursor = None
                 cursor_date = (query.get("cursor_date") or [""])[0]
@@ -1899,7 +1914,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 report = get_summary(conn, start, end, scope, year, months)
                 page_data = get_transactions_page(
                     conn, start, end, scope, search or None, year, months,
-                    page=page, page_size=25, cursor=cursor,
+                    page=page, page_size=25, cursor=cursor, movement_kind=movement_kind,
                 )
                 record_audit(conn, user["id"], "report_viewed", {
                     "scope": scope or "all_departments", "start": start, "end": end,
@@ -1952,6 +1967,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                     (query.get("year") or [None])[0],
                     (query.get("months") or [None])[0],
                 )
+                movement_kind = ((query.get("flow") or ["all"])[0] or "all").strip()
                 page = max(1, int((query.get("page") or ["1"])[0]))
                 page_size = 25
                 cursor = None
@@ -1974,7 +1990,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                     conn.commit()
                 page_data = get_transactions_page(
                     conn, start, end, scope, search or None, year, months,
-                    page=page, page_size=page_size, cursor=cursor,
+                    page=page, page_size=page_size, cursor=cursor, movement_kind=movement_kind,
                 )
                 self.send_json(
                     200,
@@ -2692,6 +2708,9 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         if format_name not in ("xlsx", "pdf"):
             self.send_json(400, {"error": "Formato no compatible."})
             return
+        movement_kind = ((query.get("flow") or ["all"])[0] or "all").strip()
+        if movement_kind not in ("all", "income", "expense"):
+            raise ValueError("El filtro de tipo de movimiento no es válido.")
         scope = resolve_summary_department(user, requested, view)
         summary = get_summary(conn, start, end, scope, year, months)
         include_detail = view == "department" or (
@@ -2700,9 +2719,11 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         search = ((query.get("q") or [""])[0] or "").strip()[:120]
         if search and not include_detail:
             raise ValueError("La búsqueda solo se puede aplicar al detalle de movimientos.")
+        if include_detail and movement_kind != "all":
+            summary["filters"]["movementKind"] = movement_kind
         if search:
             summary["filters"]["searchApplied"] = True
-        rows = get_transactions(conn, start, end, scope, search or None, year, months) if include_detail else None
+        rows = get_transactions(conn, start, end, scope, search or None, year, months, movement_kind) if include_detail else None
         event = "export_pdf" if format_name == "pdf" else "export_xlsx"
         record_audit(
             conn,
@@ -2711,7 +2732,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             {
                 "scope": scope or "global", "view": view, "start": start, "end": end,
                 "year": year, "months": months or [],
-                "detail_filtered": bool(search),
+                "detail_filtered": bool(search) or movement_kind != "all",
             },
         )
         conn.commit()

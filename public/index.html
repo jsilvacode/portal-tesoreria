@@ -207,6 +207,10 @@
               <button class="button button-soft export-button" data-format="xlsx" data-view="department" type="button">Excel</button>
             </div>
           </div>
+          <div class="detail-view-switch" role="group" aria-label="Vista del informe">
+            <button type="button" data-detail-pane="summary" aria-pressed="true">Balance</button>
+            <button type="button" data-detail-pane="movements" aria-pressed="false">Movimientos</button>
+          </div>
           <form id="detail-filter-form" class="filter-bar report-filter" aria-label="Filtros del informe">
             <div class="filter-title"><span class="filter-glyph" aria-hidden="true">◷</span><span>Filtrar período</span></div>
             <div class="report-filter-controls">
@@ -240,11 +244,27 @@
             </div>
           </form>
 
-          <div id="detail-metrics" class="metric-grid"></div>
-          <article class="panel">
+          <section id="detail-summary-pane" class="detail-summary-pane" aria-label="Balance y gráfico">
+            <div id="detail-metrics" class="metric-grid"></div>
+            <article class="panel chart-panel detail-chart-panel">
+              <div class="panel-heading">
+                <div><h2>Ingresos y egresos por mes</h2></div>
+                <span class="chart-legend"><i class="legend-in"></i>Ingresos <i class="legend-out"></i>Egresos</span>
+              </div>
+              <div id="detail-chart" class="chart-container"></div>
+            </article>
+          </section>
+          <article id="detail-movements-pane" class="panel detail-movements-pane">
             <div class="panel-heading transaction-heading">
               <div><h2>Movimientos</h2></div>
-              <span id="transaction-count" class="count-pill"></span>
+              <div class="transaction-heading-actions">
+                <div class="movement-kind-switch" role="group" aria-label="Filtrar movimientos">
+                  <button type="button" data-movement-kind="all" aria-pressed="true">Todos</button>
+                  <button type="button" data-movement-kind="income" aria-pressed="false">Ingresos</button>
+                  <button type="button" data-movement-kind="expense" aria-pressed="false">Egresos</button>
+                </div>
+                <span id="transaction-count" class="count-pill"></span>
+              </div>
             </div>
             <div id="transaction-list" class="transaction-list"></div>
             <div class="pagination load-more">

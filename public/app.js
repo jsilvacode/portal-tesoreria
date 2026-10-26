@@ -3,7 +3,8 @@ const state = {
   departments: [],
   dateRange: null,
   period: { start: "", end: "", year: "", months: [], preset: "all" },
-  reportFilters: { global: { department: "", search: "" }, detail: { department: "", search: "" } },
+  reportFilters: { global: { department: "", search: "" }, detail: { department: "", search: "", movementKind: "all" } },
+  detailPanePreference: null,
   globalSearchKey: null,
   globalReport: null,
   globalQueryKey: null,
@@ -285,12 +286,38 @@ function applyPeriodPreset(prefix) {
   updateRangeLabels(prefix);
 }
 
+function setDetailPane(pane, userChoice = false) {
+  const selected = pane || (window.matchMedia("(max-width: 680px)").matches ? "movements" : "summary");
+  if (userChoice) state.detailPanePreference = selected;
+  const section = $("#department-view");
+  section.dataset.detailPane = selected;
+  $$('[data-detail-pane]', section).forEach((button) => {
+    button.setAttribute("aria-pressed", button.dataset.detailPane === selected ? "true" : "false");
+  });
+  if (selected === "summary" && state.detailReport) {
+    renderChart($("#detail-chart"), state.detailReport.monthly);
+  }
+}
+
+function setMovementKind(kind) {
+  if (!["all", "income", "expense"].includes(kind)) return;
+  if (state.reportFilters.detail.movementKind === kind) return;
+  state.reportFilters.detail.movementKind = kind;
+  $$('[data-movement-kind]').forEach((button) => {
+    button.setAttribute("aria-pressed", button.dataset.movementKind === kind ? "true" : "false");
+  });
+  state.transactionCursor = null;
+  state.transactionPage = 1;
+  state.transactionLoaded = 0;
+  loadDepartmentReport();
+}
+
 async function applyReportFilters(prefix) {
   const period = readPeriodControls(prefix);
   if (!period) return;
   const previous = periodQuery();
   state.period = period;
-  state.reportFilters[prefix] = { department: $("#" + prefix + "-department").value,
+  state.reportFilters[prefix] = { ...state.reportFilters[prefix], department: $("#" + prefix + "-department").value,
     search: $("#" + prefix + "-search").value.trim() };
   if (prefix === "detail") state.selectedDepartment = state.reportFilters.detail.department || null;
   if (previous !== periodQuery()) state.detailFilterDirty = true;
@@ -315,7 +342,13 @@ async function showApp(user, metadata) {
   state.departments = metadata.departments || [];
   state.dateRange = metadata.dateRange;
   state.selectedDepartment = user.role === "department" ? user.department_name : null;
-  state.reportFilters = { global: { department: "", search: "" }, detail: { department: state.selectedDepartment || "", search: "" } };
+  state.reportFilters = { global: { department: "", search: "" }, detail: { department: state.selectedDepartment || "", search: "", movementKind: "all" } };
+  state.detailReport = null;
+  state.detailQueryKey = null;
+  state.detailSummaryKey = null;
+  state.detailPanePreference = null;
+  setDetailPane(null);
+  $$('[data-movement-kind]').forEach((button) => button.setAttribute("aria-pressed", button.dataset.movementKind === "all" ? "true" : "false"));
   $("#auth-screen").hidden = true;
   $("#app-shell").hidden = false;
   renderUserIdentity(user);
@@ -661,7 +694,8 @@ async function loadDepartmentReport(append = false) {
   const query = detailQuery();
   if (query === null) return;
   const search = state.reportFilters.detail.search;
-  const queryKey = query + "&q=" + encodeURIComponent(search);
+  const movementKind = state.reportFilters.detail.movementKind || "all";
+  const queryKey = query + "&q=" + encodeURIComponent(search) + "&flow=" + movementKind;
   if (!append && !state.detailFilterDirty && state.detailReport && state.detailQueryKey === queryKey) return;
   const shouldRefreshSummary = !state.detailReport || state.detailSummaryKey !== query;
   if (state.transactionController) state.transactionController.abort();
@@ -675,13 +709,14 @@ async function loadDepartmentReport(append = false) {
   button.disabled = true;
   if (append) button.textContent = "Cargando…";
   else {
-    $("#detail-metrics").innerHTML = '<div class="loading">Actualizando detalle…</div>';
+    if (shouldRefreshSummary) $("#detail-metrics").innerHTML = '<div class="loading">Actualizando balance…</div>';
     $("#transaction-list").innerHTML = '<div class="loading">Cargando movimientos…</div>';
     $("#page-label").textContent = "";
   }
   try {
     const transactionParams = new URLSearchParams(query);
     if (search) transactionParams.set("q", search);
+    if (movementKind !== "all") transactionParams.set("flow", movementKind);
     if (append && state.transactionCursor) {
       transactionParams.set("cursor_date", state.transactionCursor.date);
       transactionParams.set("cursor_id", state.transactionCursor.id);
@@ -707,6 +742,7 @@ async function loadDepartmentReport(append = false) {
     state.transactionCursor = pageData.nextCursor;
     state.transactionLoaded = (append ? state.transactionLoaded : 0) + pageData.transactions.length;
     renderMetrics($("#detail-metrics"), report);
+    renderChart($("#detail-chart"), report.monthly);
     renderTransactions(pageData, append);
   } catch (error) {
     if (requestId !== state.transactionRequest) return;
@@ -723,14 +759,17 @@ async function loadDepartmentReport(append = false) {
 
 function renderTransactions(pageData, append = false) {
   const search = state.reportFilters.detail.search;
-  $("#transaction-count").textContent = pageData.total.toLocaleString("es-CL") + (search ? " coincidencias" : " movimientos");
+  const movementKind = state.reportFilters.detail.movementKind || "all";
+  const kindLabel = movementKind === "income" ? " ingresos" : movementKind === "expense" ? " egresos" : " movimientos";
+  $("#transaction-count").textContent = pageData.total.toLocaleString("es-CL") + (search ? " coincidencias" : kindLabel);
   const loaded = state.transactionLoaded;
   $("#page-label").textContent = loaded.toLocaleString("es-CL") + " de " + pageData.total.toLocaleString("es-CL") + " movimientos";
   $("#load-more-button").hidden = !pageData.hasMore;
   $("#load-more-button").disabled = state.detailFilterDirty || !pageData.hasMore;
   const container = $("#transaction-list");
   if (!pageData.transactions.length) {
-    if (!append) container.innerHTML = '<div class="transaction-empty">' + (search ? "Sin coincidencias para la búsqueda." : "No hay movimientos para este período.") + '</div>';
+    const emptyMessage = search ? "Sin coincidencias para la búsqueda." : movementKind === "income" ? "No hay ingresos para este período." : movementKind === "expense" ? "No hay egresos para este período." : "No hay movimientos para este período.";
+    if (!append) container.innerHTML = '<div class="transaction-empty">' + emptyMessage + '</div>';
     return;
   }
   const markup = pageData.transactions.map((row) => transactionRowHTML(row)).join("");
@@ -960,6 +999,9 @@ function exportReport(format, view) {
   if (state.user.role === "leadership" && view !== "global") return;
   const department = view === "department" ? getDetailScope() : state.reportFilters.global.department;
   if (department) params.set("department", department);
+  if (view === "department" && state.reportFilters.detail.movementKind !== "all") {
+    params.set("flow", state.reportFilters.detail.movementKind);
+  }
   if (view === "all_detail" && !hasAdminAccess(state.user)) {
     toast("La exportación detallada global requiere acceso de tesorería.", "error");
     return;
@@ -1349,6 +1391,12 @@ $("#load-more-button").addEventListener("click", () => {
     loadDepartmentReport(true);
   }
 });
+$$('[data-detail-pane]').forEach((button) => button.addEventListener("click", () => {
+  setDetailPane(button.dataset.detailPane, true);
+}));
+$$('[data-movement-kind]').forEach((button) => button.addEventListener("click", () => {
+  setMovementKind(button.dataset.movementKind);
+}));
 $("#global-search-more").addEventListener("click", () => {
   if (!state.globalSearchLoading && state.globalSearchCursor) loadGlobalSearch(true);
 });
@@ -1436,7 +1484,8 @@ $("#movement-review-panel").addEventListener("click", (event) => {
 });
 function renderMaintenanceRecord(record) {
   const labels = {id: "ID", batch_id: "Lote", source_row: "Fila de origen", department_id: "Código de departamento", department_name: "Departamento", opening_balance: "Saldo inicial", movement_type_number: "Código de movimiento", movement_type: "Tipo", movement_date: "Fecha contable", event_date: "Fecha del evento", amount: "Importe", description: "Glosa", base_person_id: "Código de persona", server_id: "Código de servidor", donor_name: "Aportante", currency: "Moneda", total_by_currency: "Total por moneda", observations: "Observaciones", email: "Correo", role: "Rol", status: "Estado", created_at: "Creación", approved_at: "Aprobación", user_id: "ID de usuario", event_type: "Acción", detail: "Detalle"};
-  $("#maintenance-record").textContent = Object.entries(record).map(([key, value]) => {
+  const hiddenMovementFields = new Set(["id", "batch_id", "currency", "total_by_currency"]);
+  $("#maintenance-record").textContent = Object.entries(record).filter(([key]) => !hiddenMovementFields.has(key)).map(([key, value]) => {
     const shown = ["amount", "opening_balance", "total_by_currency"].includes(key) && value != null ? money(value) : value ?? "—";
     return (labels[key] || key) + ": " + shown;
   }).join("\n");
@@ -1474,6 +1523,10 @@ if ("ResizeObserver" in window) {
 }
 
 window.addEventListener("resize", () => {
+  if (!state.detailPanePreference) setDetailPane(null);
+  if (state.detailReport && $("#department-view").dataset.detailPane === "summary") {
+    renderChart($("#detail-chart"), state.detailReport.monthly);
+  }
   if (state.globalReport && state.currentView === "overview") {
     renderChart($("#global-chart"), state.globalReport.monthly);
   }

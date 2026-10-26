@@ -218,6 +218,16 @@ a { color: inherit; text-decoration: none; }
 .search-results-panel { margin-bottom: 15px; overflow: hidden; }
 .table-empty { padding: 24px 14px !important; color: #8592a1; text-align: center !important; }
 .transaction-heading { padding: 18px 20px 14px; }
+.detail-view-switch { display: none; width: fit-content; gap: 4px; margin: -7px 0 14px auto; padding: 4px; border: 1px solid #e4eaf0; border-radius: 10px; background: #f5f8fb; }
+.detail-view-switch button { min-height: 40px; padding: 0 16px; border: 0; border-radius: 7px; color: #66798f; background: transparent; font-size: 15px; font-weight: 700; }
+.detail-view-switch button[aria-pressed="true"] { color: var(--navy); background: #fff; box-shadow: 0 1px 4px rgba(24, 50, 80, .12); }
+.detail-chart-panel { margin-bottom: 15px; }
+.transaction-heading-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; flex-wrap: wrap; }
+.movement-kind-switch { display: inline-flex; align-items: center; gap: 3px; padding: 3px; border: 1px solid #e4eaf0; border-radius: 9px; background: #f7f9fb; }
+.movement-kind-switch button { min-height: 44px; padding: 0 11px; border: 0; border-radius: 6px; color: #6e7f92; background: transparent; font-size: 14px; font-weight: 700; white-space: nowrap; }
+.movement-kind-switch button[aria-pressed="true"] { color: var(--navy); background: #fff; box-shadow: 0 1px 4px rgba(24, 50, 80, .12); }
+.movement-kind-switch button[data-movement-kind="income"][aria-pressed="true"] { color: var(--excel-green); }
+.movement-kind-switch button[data-movement-kind="expense"][aria-pressed="true"] { color: var(--red); }
 .transaction-list { border-top: 1px solid #edf0f3; }
 .transaction-row { display: grid; grid-template-columns: 86px 78px minmax(175px, 1.1fr) minmax(200px, 1.8fr) 115px; gap: 10px; align-items: start; padding: 12px 18px; border-bottom: 1px solid #eff2f5; }
 .transaction-row:hover { background: #fbfcfe; }
@@ -349,6 +359,10 @@ a { color: inherit; text-decoration: none; }
   .content-wrap { width: auto; margin-right: max(12px, env(safe-area-inset-right)); margin-left: max(12px, env(safe-area-inset-left)); padding: 22px 0 15px; }
   .page-heading { align-items: flex-start; flex-direction: column; gap: 12px; margin-bottom: 16px; }
   .page-heading h1 { font-size: 27px; }
+  .detail-view-switch { display: flex; position: sticky; top: calc(var(--topbar-height, 58px) + 48px); z-index: 3; width: 100%; justify-content: stretch; margin: -5px 0 12px; padding: 4px; border-color: rgba(222, 230, 238, .94); background: rgba(247, 249, 252, .94); box-shadow: 0 4px 12px rgba(29, 50, 77, .06); backdrop-filter: blur(10px); }
+  #department-view[data-detail-pane="summary"] #detail-movements-pane,
+  #department-view[data-detail-pane="movements"] #detail-summary-pane { display: none; }
+  .detail-view-switch button { flex: 1; min-height: 44px; padding: 0 10px; font-size: 15px; }
   .page-heading p { font-size: 14px; line-height: 1.45; }
   .heading-actions { width: 100%; }
   .heading-actions .button { flex: 1; min-width: 0; min-height: 40px; padding: 0 8px; font-size: 14px; }
@@ -396,7 +410,12 @@ a { color: inherit; text-decoration: none; }
   .scope-footnote { font-size: 14px; line-height: 1.5; }
   .app-footer { flex-direction: column; padding: 13px max(14px, env(safe-area-inset-right)) calc(13px + env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left)); font-size: 14px; }
   .transaction-heading { padding: 14px 12px 11px; }
+  .transaction-heading { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 8px; }
+  .transaction-heading-actions { display: grid; grid-template-rows: 44px 32px; justify-items: end; align-content: start; gap: 6px; width: 100%; }
+  .movement-kind-switch { gap: 2px; padding: 2px; }
+  .movement-kind-switch button { min-height: 44px; padding: 0 9px; font-size: 14px; }
   .count-pill { font-size: 14px; }
+  .transaction-heading .count-pill { width: 180px; min-height: 32px; justify-content: center; white-space: nowrap; }
   .transaction-row { grid-template-columns: 70px minmax(0, 1fr) 105px; gap: 5px 9px; padding: 12px; }
   .transaction-date { grid-column: 1; grid-row: 1; font-size: 14px; }
   .transaction-date small { font-size: 14px; }
