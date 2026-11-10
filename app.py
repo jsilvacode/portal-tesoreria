@@ -777,6 +777,7 @@ def import_records_from_xlsx(file_bytes: bytes) -> list[dict]:
                     "department_id": normalize_text(raw["DEPARTMENT_ID"]),
                     "department_name": department,
                     "opening_balance": opening,
+                    "_opening_present": raw["Balance Inicial"] is not None and bool(normalize_text(raw["Balance Inicial"])),
                     "movement_type_number": type_number,
                     "movement_type": normalize_text(raw["Tipo Movimiento"]),
                     "movement_date": movement_date,
@@ -934,6 +935,49 @@ def analyze_import(conn, records: list[dict]) -> dict:
         "file_repeats": internal_repeat_count,
         "match_samples": samples,
         "samples_truncated": exact_count + similar_count + internal_repeat_count > len(samples),
+    }
+
+
+def analyze_replacement(conn, records: list[dict]) -> dict:
+    """Describe and fingerprint everything a full accounting replacement affects."""
+    openings = {}
+    conflicts = set()
+    for record in records:
+        name = record["department_name"]
+        opening = (record["opening_balance"], record["currency"])
+        # Older previews did not record whether the source cell was empty.
+        # They must be validated again before destructive replacement.
+        if not record.get("_opening_present", False):
+            conflicts.add(name)
+        if name in openings and openings[name] != opening:
+            conflicts.add(name)
+        else:
+            openings[name] = opening
+
+    departments = conn.execute(
+        """SELECT d.name, d.opening_balance, d.currency,
+                  d.opening_balance + COALESCE(SUM(t.amount), 0) AS current_balance
+           FROM departments d LEFT JOIN transactions t ON t.department_name = d.name
+           GROUP BY d.name, d.opening_balance, d.currency ORDER BY d.name"""
+    ).fetchall()
+    transactions = conn.execute("SELECT * FROM transactions ORDER BY id").fetchall()
+    digest = hashlib.sha256()
+    for label, rows in (("departments", departments), ("transactions", transactions)):
+        digest.update(label.encode("utf-8") + b"\n")
+        for row in rows:
+            digest.update(json.dumps(dict(row), sort_keys=True, ensure_ascii=False, default=str).encode("utf-8"))
+            digest.update(b"\n")
+    dates = [row["movement_date"] for row in transactions]
+    return {
+        "current_rows": len(transactions),
+        "current_period": {"start": min(dates) if dates else None, "end": max(dates) if dates else None},
+        "missing_departments": [
+            {"name": row["name"], "opening_balance": int(row["opening_balance"]),
+             "current_balance": int(row["current_balance"])}
+            for row in departments if row["name"] not in openings
+        ],
+        "opening_conflicts": sorted(conflicts),
+        "replace_signature": digest.hexdigest(),
     }
 
 
@@ -2442,6 +2486,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             "SELECT COUNT(*) FROM import_batches WHERE file_sha256 = ?", (file_hash,)
         ).fetchone()[0]
         analysis = analyze_import(conn, records)
+        replacement = analyze_replacement(conn, records)
         token = secrets.token_urlsafe(24)
         conn.execute(
             """INSERT INTO import_previews(token, filename, file_sha256, row_count, created_by, created_at)
@@ -2482,6 +2527,7 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 "same_file_warning": bool(previous),
                 "message": "No se eliminarán filas automáticamente; revisa los avisos antes de incorporar.",
                 "new_departments": unknown,
+                "replace_preview": replacement,
                 **analysis,
             },
         )
@@ -2560,6 +2606,26 @@ class TreasuryHandler(BaseHTTPRequestHandler):
         if len(staged) != preview["row_count"]:
             raise ValueError("La vista previa está incompleta; vuelve a cargar el archivo.")
         records = [json.loads(row["record_json"]) for row in staged]
+        mode = payload.get("mode", "append")
+        if mode not in ("append", "reconcile", "replace"):
+            raise ValueError("Modo de incorporación inválido.")
+        replacement = None
+        if mode == "replace":
+            if payload.get("confirm_replace") is not True or payload.get("confirm_backup") is not True:
+                raise ValueError("Confirma el reemplazo completo y que has comprobado un respaldo.")
+            if payload.get("replace_confirmation") != "REEMPLAZAR TODA LA CONTABILIDAD":
+                raise ValueError("Escribe la frase de confirmación completa.")
+            account = conn.execute("SELECT password_hash FROM users WHERE id = ? AND status = 'active'", (actor["id"],)).fetchone()
+            if not account or not verify_password(str(payload.get("password") or ""), account["password_hash"]):
+                raise PermissionError("La contraseña no es correcta.")
+            if isinstance(conn, PostgresConnection):
+                conn.execute("LOCK TABLE transactions, departments IN SHARE ROW EXCLUSIVE MODE")
+            replacement = analyze_replacement(conn, records)
+            if replacement["opening_conflicts"]:
+                raise ValueError("El archivo contiene saldos iniciales vacíos, inconsistentes o monedas distintas por departamento: " + ", ".join(replacement["opening_conflicts"]))
+            if payload.get("replace_signature") != replacement["replace_signature"]:
+                self.send_json(409, {"error": "La contabilidad cambió desde la vista previa. Vuelve a validar el archivo."})
+                return
         analysis = analyze_import(conn, records)
         known_departments = {
             row["name"] for row in conn.execute("SELECT name FROM departments").fetchall()
@@ -2594,9 +2660,6 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 },
             )
             return
-        mode = payload.get("mode", "append")
-        if mode not in ("append", "reconcile"):
-            raise ValueError("Modo de incorporación inválido.")
         if mode == "reconcile":
             if payload.get("review_signature") != analysis["review_signature"]:
                 self.send_json(409, {"error": "La contabilidad cambió. Vuelve a validar el archivo para revisar las coincidencias actuales."})
@@ -2606,6 +2669,9 @@ class TreasuryHandler(BaseHTTPRequestHandler):
             if not keep.issubset(matched):
                 raise ValueError("La selección de coincidencias no es válida.")
             records = [record for record in records if record["source_row"] not in matched or record["source_row"] in keep]
+        if mode == "replace":
+            conn.execute("DELETE FROM transactions")
+            conn.execute("UPDATE departments SET opening_balance = 0")
         inserted_count = len(records)
         batch_id = conn.execute(
             """INSERT INTO import_batches(filename, file_sha256, row_count, imported_by, imported_at)
@@ -2627,6 +2693,9 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                        VALUES (?, ?, ?)""",
                     (department, record["opening_balance"], record["currency"]),
                 )
+                if mode == "replace":
+                    conn.execute("UPDATE departments SET opening_balance = ?, currency = ? WHERE name = ?",
+                                 (record["opening_balance"], record["currency"], department))
                 known_departments.add(department)
         transaction_rows = [
             (
@@ -2680,6 +2749,10 @@ class TreasuryHandler(BaseHTTPRequestHandler):
                 "exact_matches": analysis["exact_matches"],
                 "similar_matches": analysis["similar_matches"],
                 "file_repeats": analysis["file_repeats"],
+                **({"replaced_rows": replacement["current_rows"],
+                    "previous_period": replacement["current_period"],
+                    "departments_without_file_rows": [item["name"] for item in replacement["missing_departments"]]}
+                   if replacement is not None else {}),
             },
         )
         conn.commit()

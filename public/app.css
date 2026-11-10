@@ -284,6 +284,14 @@ a { color: inherit; text-decoration: none; }
 .import-cancel:hover { color: #863d44; border-color: #d9aeb2; background: #fff7f7; }
 .import-period { display: inline-block; margin-top: 3px; color: #405872; font-weight: 700; }
 .import-warning { display: block; width: 100%; margin: 11px 0 8px; padding: 10px 11px; border-radius: 7px; color: #805a16; background: #fff1d5; }
+.import-replace-option { color: #a51f2b; font-weight: 700; }
+.import-replace-warning { margin: 14px 0; padding: 16px; border: 2px solid #b42332; border-radius: 8px; color: #781723; background: #fff1f1; }
+.import-preview .import-replace-warning strong { color: #971c29; }
+.import-replace-warning p { margin: 9px 0; }
+.import-replace-warning .admin-search { display: block; margin-top: 12px; color: #781723; font-weight: 700; }
+.import-replace-warning .admin-search input { display: block; width: 100%; margin-top: 5px; }
+.import-confirm.import-replace-confirm { color: #781723; }
+.import-confirm.import-replace-confirm input { accent-color: #a51f2b; }
 .import-overlap-list, .import-match-counts { margin: 6px 0 0; padding-left: 19px; }
 .import-overlap-list li + li, .import-match-counts li + li { margin-top: 4px; }
 .import-confirm { display: flex; align-items: flex-start; gap: 9px; margin: 10px 0; color: #405872; font-size: 14px; font-weight: 600; line-height: 1.45; }

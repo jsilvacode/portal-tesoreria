@@ -1043,6 +1043,9 @@ function renderImportPreview(preview) {
   const repeatCount = Number(preview.file_repeats || 0);
   const matchCount = exactCount + similarCount + repeatCount;
   const newDepartments = preview.new_departments || [];
+  const replacement = preview.replace_preview;
+  const missingDepartments = replacement?.missing_departments || [];
+  const openingConflicts = replacement?.opening_conflicts || [];
   const overlapItems = (preview.overlapping_batches || []).map((batch) =>
     '<li><strong>' + escapeHTML(batch.filename) + '</strong> · ' +
     shortDate(batch.start) + '–' + shortDate(batch.end) +
@@ -1074,7 +1077,26 @@ function renderImportPreview(preview) {
     ' filas validadas.<br><span class="import-period">Período: ' +
     shortDate(preview.period.start) + '–' + shortDate(preview.period.end) + '</span>';
 
-  html += '<label class="admin-search">Tratamiento del archivo<select id="import-mode"><option value="reconcile">Actualizar: excluir ocurrencias ya registradas</option><option value="append">Agregar todas las filas, incluidas las coincidencias</option></select></label>' +
+  html += '<label class="admin-search">Tratamiento del archivo<select id="import-mode"><option value="reconcile">Actualizar: excluir ocurrencias ya registradas</option><option value="append">Agregar todas las filas, incluidas las coincidencias</option><option class="import-replace-option" value="replace"' + (!replacement ? ' disabled' : '') + '>EMERGENCIA: sobrescribir toda la contabilidad</option></select></label>' +
+    '<section id="import-replace-warning" class="import-replace-warning" aria-labelledby="import-replace-title" hidden>' +
+      '<div role="alert"><strong id="import-replace-title">PELIGRO: se reemplazará toda la contabilidad</strong>' +
+      '<p>Se eliminarán todos los movimientos contables actuales, incluso los de fechas fuera del período del archivo. Se incorporarán todas las filas del archivo y se sustituirán los saldos iniciales por los que contiene.</p>' +
+      '<p>Comprueba que el saldo inicial de cada departamento sea el arrastre anterior al primer movimiento del archivo; el balance sumará los movimientos a partir de ese saldo.</p>' +
+      '<p>Los usuarios y departamentos se conservarán. Los departamentos que no aparezcan en el archivo quedarán con saldo inicial $0 y sin movimientos. Esta operación cambia el balance completo.</p>' +
+      '<p><strong>Crea y comprueba un respaldo de la base de datos antes de continuar.</strong> Esta operación no crea un respaldo automáticamente.</p>' +
+      (replacement ? '<p>Movimientos actuales que se eliminarán: <strong>' + Number(replacement.current_rows).toLocaleString("es-CL") + '</strong>' +
+        (replacement.current_period?.start && replacement.current_period?.end ? ' · Período actual: ' + shortDate(replacement.current_period.start) + '–' + shortDate(replacement.current_period.end) : '') +
+        '. Filas del archivo que se incorporarán: <strong>' + Number(preview.rows).toLocaleString("es-CL") + '</strong>.</p>' : '') +
+      (missingDepartments.length ? '<p><strong>Departamentos ausentes: sus saldos iniciales quedarán en $0.</strong></p><ul class="import-overlap-list">' +
+        missingDepartments.map((department) => '<li>' + escapeHTML(department.name) + ' · saldo inicial actual: ' + escapeHTML(money(department.opening_balance)) + ' · saldo actual: ' + escapeHTML(money(department.current_balance)) + '</li>').join('') + '</ul>' : '') +
+      (openingConflicts.length ? '<p><strong>No se puede sobrescribir:</strong> hay saldos iniciales vacíos o inconsistentes, o monedas distintas, en estos departamentos. Corrige el archivo y vuelve a validarlo.</p><ul class="import-overlap-list">' +
+        openingConflicts.map((department) => '<li>' + escapeHTML(department) + '</li>').join('') + '</ul>' : '') +
+      '</div>' +
+      '<label class="import-confirm import-replace-confirm"><input id="confirm-import-replace" type="checkbox"><span>Entiendo que se eliminarán todos los movimientos actuales y que la contabilidad completa será sustituida por este archivo.</span></label>' +
+      '<label class="import-confirm import-replace-confirm"><input id="confirm-import-backup" type="checkbox"><span>Creé y comprobé un respaldo de la base de datos antes de continuar.</span></label>' +
+      '<label class="admin-search">Escribe REEMPLAZAR TODA LA CONTABILIDAD<input id="import-replace-phrase" type="text" autocomplete="off" spellcheck="false"></label>' +
+      '<label class="admin-search">Tu contraseña<input id="import-replace-password" type="password" autocomplete="current-password"></label>' +
+    '</section>' +
     '<p>' + matchedRows.size.toLocaleString("es-CL") + ' ocurrencias ya registradas · ' + Number(preview.new_rows ?? preview.rows).toLocaleString("es-CL") + ' por incorporar antes de revisar excepciones.</p>';
   if (preview.same_file_warning) {
     html += '<div class="import-warning"><strong>Archivo ya incorporado</strong><br>' +
@@ -1123,7 +1145,7 @@ function renderImportPreview(preview) {
     html += '<div class="import-clear">No se encontraron coincidencias completas ni filas idénticas dentro del archivo.</div>';
   }
 
-  html += '<p class="import-no-filter">' + escapeHTML(preview.message) + '</p>' +
+  html += '<p id="import-standard-message" class="import-no-filter">' + escapeHTML(preview.message) + '</p>' +
     '<div class="import-actions"><button id="cancel-import" class="button button-outline import-cancel" type="button">Cancelar carga</button>' +
     '<button id="commit-import" class="button button-primary" type="button">Incorporar ' +
     Number(preview.rows).toLocaleString("es-CL") + ' movimientos</button></div>';
@@ -1131,17 +1153,37 @@ function renderImportPreview(preview) {
   container.innerHTML = html;
   container.hidden = false;
   const updateButton = () => {
+    const replacing = $("#import-mode").value === "replace";
+    $("#import-replace-warning").hidden = !replacing;
+    $("#import-standard-message").hidden = replacing;
+    $$(".keep-import-row").forEach((input) => { input.closest("label").hidden = replacing; });
     const overlapConfirmed = !overlapCount || $("#confirm-import-overlap").checked;
     const matchesConfirmed = !matchCount || $("#confirm-import-matches").checked;
     const departmentsConfirmed = !newDepartments.length || $("#confirm-import-new-departments").checked;
     const count = $("#import-mode").value === "reconcile"
       ? Number(preview.new_rows ?? preview.rows) + $$(".keep-import-row:checked").length : Number(preview.rows);
-    $("#commit-import").textContent = "Incorporar " + count.toLocaleString("es-CL") + " movimientos";
-    $("#commit-import").disabled = !overlapConfirmed || !matchesConfirmed || !departmentsConfirmed;
+    const replaceConfirmed = !replacing || (Boolean(replacement?.replace_signature) && !openingConflicts.length &&
+      $("#confirm-import-replace").checked && $("#confirm-import-backup").checked && $("#import-replace-phrase").value === "REEMPLAZAR TODA LA CONTABILIDAD" &&
+      Boolean($("#import-replace-password").value));
+    const commitButton = $("#commit-import");
+    commitButton.textContent = replacing ? "Sobrescribir toda la contabilidad" : "Incorporar " + count.toLocaleString("es-CL") + " movimientos";
+    commitButton.classList.toggle("button-danger", replacing);
+    commitButton.classList.toggle("button-primary", !replacing);
+    commitButton.disabled = !overlapConfirmed || !matchesConfirmed || !departmentsConfirmed || !replaceConfirmed;
   };
   [$("#confirm-import-overlap"), $("#confirm-import-matches"), $("#confirm-import-new-departments")].filter(Boolean)
     .forEach((checkbox) => checkbox.addEventListener("change", updateButton));
-  $("#import-mode").addEventListener("change", updateButton);
+  $("#import-mode").addEventListener("change", () => {
+    $("#confirm-import-replace").checked = false;
+    $("#confirm-import-backup").checked = false;
+    $("#import-replace-phrase").value = "";
+    $("#import-replace-password").value = "";
+    updateButton();
+  });
+  $("#confirm-import-replace").addEventListener("change", updateButton);
+  $("#confirm-import-backup").addEventListener("change", updateButton);
+  $("#import-replace-phrase").addEventListener("input", updateButton);
+  $("#import-replace-password").addEventListener("input", updateButton);
   $$(".keep-import-row").forEach(input => input.addEventListener("change", updateButton));
   updateButton();
   $("#cancel-import").addEventListener("click", cancelImport);
@@ -1177,8 +1219,11 @@ async function commitImport() {
   if (!state.importPreview) return;
   const commitButton = $("#commit-import");
   if (!commitButton || commitButton.disabled) return;
+  const mode = $("#import-mode").value;
+  const replacing = mode === "replace";
+  if (replacing && !window.confirm("CONFIRMACIÓN FINAL: se eliminarán TODOS los movimientos contables actuales y se reemplazarán con las filas de este archivo. Los saldos iniciales cambiarán según el archivo y los departamentos ausentes quedarán con saldo inicial $0. ¿Deseas sobrescribir toda la contabilidad?")) return;
   let confirmSame = false;
-  if (state.importPreview.same_file_warning && $("#import-mode").value === "append") {
+  if (state.importPreview.same_file_warning && mode === "append") {
     confirmSame = window.confirm("Ya se importó antes un archivo con el mismo contenido. ¿Deseas incorporar esta copia completa como un nuevo lote?");
     if (!confirmSame) return;
   }
@@ -1191,10 +1236,15 @@ async function commitImport() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         preview_token: state.importPreview.preview_token,
-        confirm_same_file: confirmSame || $("#import-mode").value === "reconcile",
-        mode: $("#import-mode").value,
+        confirm_same_file: confirmSame || mode === "reconcile" || replacing,
+        mode,
         review_signature: state.importPreview.review_signature,
-        keep_rows: $$(".keep-import-row:checked").map(input => Number(input.value)),
+        keep_rows: replacing ? [] : $$(".keep-import-row:checked").map(input => Number(input.value)),
+        confirm_replace: replacing && $("#confirm-import-replace").checked,
+        confirm_backup: replacing && $("#confirm-import-backup").checked,
+        replace_confirmation: replacing ? $("#import-replace-phrase").value : "",
+        password: replacing ? $("#import-replace-password").value : "",
+        replace_signature: replacing ? state.importPreview.replace_preview?.replace_signature : "",
         confirm_overlap: !state.importPreview.overlap_count || $("#confirm-import-overlap").checked,
         confirm_new_departments: !(state.importPreview.new_departments || []).length ||
           $("#confirm-import-new-departments").checked,

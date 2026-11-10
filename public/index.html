@@ -301,8 +301,8 @@
               <input id="import-file" name="file" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required>
               <button class="button button-primary" type="submit">Validar archivo</button>
             </form>
-            <div id="import-preview" class="import-preview" hidden></div>
-            <div class="import-policy"><strong>Revisión de carga:</strong> no se eliminan filas automáticamente. Se mostrarán los períodos superpuestos y las coincidencias para que el tesorero decida antes de incorporar.</div>
+            <div id="import-preview" class="import-preview" aria-live="polite" hidden></div>
+            <div class="import-policy"><strong>Revisión de carga:</strong> se mostrarán los períodos superpuestos y las coincidencias. La opción de emergencia permite reemplazar toda la contabilidad y requiere confirmaciones adicionales.</div>
           </section>
           <section id="admin-audit-panel" class="admin-panel panel" hidden>
             <div class="panel-heading"><div><h2>Consultar bitácora</h2></div></div>

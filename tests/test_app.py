@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import threading
 import urllib.parse
@@ -269,6 +270,146 @@ class TreasuryTests(unittest.TestCase):
         after = app.analyze_import(self.conn, [row])
         self.assertNotEqual(before["review_signature"], after["review_signature"])
 
+    def _preview_full_replacement(self, records=None):
+        """Stage synthetic rows through the same preview flow used by the UI."""
+        self.conn.execute("UPDATE users SET password_hash = ? WHERE id = 1", (app.password_hash("clave-de-prueba"),))
+        self.conn.execute(
+            "INSERT INTO users(email, password_hash, role, department_name, status, created_at) VALUES (?, ?, 'department', ?, 'active', ?)",
+            ("sur@example.test", "test-only", "Departamento Sur", app.utc_now()),
+        )
+        self.conn.commit()
+        record = {
+            "source_row": 2, "department_id": "N", "department_name": "Departamento Norte",
+            "opening_balance": 230_000, "_opening_present": True, "movement_type_number": 1, "movement_type": "Ingreso",
+            "movement_date": "2026-10-01", "event_date": "2026-10-01", "amount": 12_300,
+            "description": "Nuevo ingreso", "base_person_id": "", "server_id": "",
+            "donor_name": "", "currency": "CLP", "total_by_currency": 300_000, "observations": "",
+        }
+        records = records if records is not None else [
+            record, {**record, "source_row": 3, "movement_date": "2026-10-02",
+                     "event_date": "2026-10-02", "amount": -3_000, "description": "Nuevo egreso"},
+        ]
+        handler = CommitHandler({}, 1)
+        handler.parse_uploaded_xlsx = lambda: ("anual.xlsx", b"synthetic replacement workbook")
+        with patch("app.import_records_from_xlsx", return_value=records):
+            handler.handle_import_preview(self.conn)
+        self.assertEqual(handler.response[0], 200)
+        preview = handler.response[1]
+        payload = {
+            "preview_token": preview["preview_token"], "mode": "replace",
+            "review_signature": preview["review_signature"],
+            "replace_signature": preview["replace_preview"]["replace_signature"],
+            "confirm_replace": True, "replace_confirmation": "REEMPLAZAR TODA LA CONTABILIDAD",
+            "password": "clave-de-prueba", "confirm_backup": True,
+            "confirm_same_file": True, "confirm_overlap": True,
+            "confirm_matches": True, "confirm_new_departments": True,
+        }
+        return preview, payload
+
+    def test_replace_replaces_all_movements_and_openings_preserving_accounts(self):
+        preview, payload = self._preview_full_replacement()
+        self.assertEqual(preview["replace_preview"]["current_rows"], 35)
+        self.assertIn("Departamento Sur", [d["name"] for d in preview["replace_preview"]["missing_departments"]])
+        before_users = [tuple(row) for row in self.conn.execute("SELECT * FROM users ORDER BY id")]
+        handler = CommitHandler(payload, 1)
+        handler.handle_import_commit(self.conn)
+        self.assertEqual(handler.response[0], 201)
+        self.assertEqual(handler.response[1]["rows"], 2)
+        movements = self.conn.execute("SELECT description, amount FROM transactions ORDER BY source_row").fetchall()
+        self.assertEqual([tuple(r) for r in movements], [("Nuevo ingreso", 12_300), ("Nuevo egreso", -3_000)])
+        openings = dict(self.conn.execute("SELECT name, opening_balance FROM departments").fetchall())
+        self.assertEqual(openings, {"Departamento Norte": 230_000, "Departamento Sur": 0})
+        summary = app.get_summary(self.conn, "2026-10-01", "2026-10-31", "Departamento Norte")
+        self.assertEqual(summary["totals"]["opening"], 230_000)
+        self.assertEqual(summary["totals"]["closing"], 239_300)
+        self.assertEqual([tuple(row) for row in self.conn.execute("SELECT * FROM users ORDER BY id")], before_users)
+        audit = self.conn.execute("SELECT detail FROM audit_log WHERE event_type = 'import_completed' ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertEqual(json.loads(audit["detail"])["mode"], "replace")
+        self.assertNotIn("clave-de-prueba", audit["detail"])
+
+    def test_replace_requires_explicit_confirmation_phrase_and_correct_password(self):
+        _, payload = self._preview_full_replacement()
+        for changes in ({"confirm_replace": False}, {"confirm_backup": False}, {"replace_confirmation": "REEMPLAZAR"}, {"password": "incorrecta"}):
+            with self.subTest(changes=changes):
+                conn = app.connect(self.db_path)
+                try:
+                    handler = CommitHandler({**payload, **changes}, 1)
+                    try:
+                        handler.handle_import_commit(conn)
+                    except (ValueError, PermissionError):
+                        pass
+                    else:
+                        self.assertGreaterEqual(handler.response[0], 400)
+                finally:
+                    conn.close()
+                self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0], 35)
+                self.assertEqual(self.conn.execute("SELECT opening_balance FROM departments WHERE name='Departamento Sur'").fetchone()[0], 50_000)
+
+    def test_replace_rejects_non_treasurer_even_with_correct_confirmation(self):
+        _, payload = self._preview_full_replacement()
+        handler = CommitHandler(payload, 1)
+        handler.require_user = lambda conn: {"id": 2, "role": "department", "department_name": "Departamento Sur"}
+        handler.require_treasurer = app.TreasuryHandler.require_treasurer.__get__(handler, CommitHandler)
+        handler.handle_import_commit(self.conn)
+        self.assertEqual(handler.response[0], 403)
+        self.conn.rollback()
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0], 35)
+
+    def test_replace_rejects_stale_preview_even_for_old_movement(self):
+        _, payload = self._preview_full_replacement()
+        self.conn.execute("UPDATE transactions SET amount = amount + 1 WHERE id = 1")
+        self.conn.commit()
+        handler = CommitHandler(payload, 1)
+        handler.handle_import_commit(self.conn)
+        self.assertEqual(handler.response[0], 409)
+        self.conn.rollback()
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0], 35)
+        self.assertEqual(self.conn.execute("SELECT amount FROM transactions WHERE id=1").fetchone()[0], 101)
+
+    def test_replace_rejects_conflicting_opening_balances(self):
+        record = {
+            "source_row": 2, "department_id": "N", "department_name": "Departamento Norte", "opening_balance": 100, "_opening_present": True,
+            "movement_type_number": 1, "movement_type": "Ingreso", "movement_date": "2026-10-01",
+            "event_date": "2026-10-01", "amount": 500, "description": "Primero", "base_person_id": "",
+            "server_id": "", "donor_name": "", "currency": "CLP", "total_by_currency": 500, "observations": "",
+        }
+        preview, payload = self._preview_full_replacement([record, {**record, "source_row": 3, "opening_balance": 200}])
+        self.assertIn("Departamento Norte", preview["replace_preview"]["opening_conflicts"])
+        handler = CommitHandler(payload, 1)
+        try:
+            handler.handle_import_commit(self.conn)
+        except ValueError:
+            pass
+        else:
+            self.assertGreaterEqual(handler.response[0], 400)
+        self.conn.rollback()
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0], 35)
+
+    def test_replace_preview_flags_missing_opening_or_inconsistent_currency(self):
+        row = {"department_name": "Departamento Norte", "opening_balance": 0,
+               "currency": "CLP", "_opening_present": False}
+        self.assertEqual(app.analyze_replacement(self.conn, [row])["opening_conflicts"], ["Departamento Norte"])
+        row["_opening_present"] = True
+        conflict = {**row, "currency": "USD"}
+        self.assertEqual(app.analyze_replacement(self.conn, [row, conflict])["opening_conflicts"], ["Departamento Norte"])
+        del row["_opening_present"]
+        self.assertEqual(app.analyze_replacement(self.conn, [row])["opening_conflicts"], ["Departamento Norte"])
+
+    def test_replace_rolls_back_when_inserting_new_movements_fails(self):
+        _, payload = self._preview_full_replacement()
+        self.conn.execute("CREATE TRIGGER test_reject_insert BEFORE INSERT ON transactions BEGIN SELECT RAISE(ABORT, 'synthetic insert failure'); END")
+        self.conn.commit()
+        conn = app.connect(self.db_path)
+        try:
+            handler = CommitHandler(payload, 1)
+            with self.assertRaises(sqlite3.IntegrityError):
+                handler.handle_import_commit(conn)
+        finally:
+            conn.close()
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0], 35)
+        self.assertEqual(self.conn.execute("SELECT opening_balance FROM departments WHERE name='Departamento Norte'").fetchone()[0], 100_000)
+        self.assertEqual(self.conn.execute("SELECT status FROM import_previews WHERE token=?", (payload["preview_token"],)).fetchone()[0], "ready")
+
     def test_audit_user_filter_and_csv_use_the_same_selection(self):
         app.record_audit(self.conn, 1, 'report_viewed', {"scope": "Departamento Norte"})
         app.record_audit(self.conn, None, 'system', {})
@@ -513,6 +654,10 @@ class TreasuryTests(unittest.TestCase):
                  id INTEGER PRIMARY KEY AUTOINCREMENT, preview_token TEXT NOT NULL, record_json TEXT NOT NULL
                );
                CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+               CREATE TABLE audit_log (
+                 id INTEGER PRIMARY KEY, user_id INTEGER, event_type TEXT NOT NULL,
+                 detail TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
+               );
                CREATE TABLE users (
                  id INTEGER PRIMARY KEY, email TEXT, password_hash TEXT, role TEXT,
                  department_name TEXT, status TEXT
